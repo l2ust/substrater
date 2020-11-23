@@ -16,6 +16,7 @@ serde              = { version = "1.0.117", features = ["derive"] }
 serde_json         = { version = "1.0.59" }
 subhasher          = { version = "0.1.0", path = "../subalfred/subhasher" }
 subrpcer           = { version = "0.1.0", path = "../subalfred/subrpcer" }
+substorager        = { version = "0.1.0", path = "../subalfred/substorager" }
 thiserror          = { version = "1.0.22" }
 tracing            = { version = "0.1.21" }
 tungstenite        = { version = "0.11.1" }

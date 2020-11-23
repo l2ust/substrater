@@ -409,6 +409,7 @@ dependencies = [
  "sp-core",
  "subhasher",
  "subrpcer",
+ "substorager",
  "thiserror",
  "tracing",
  "tungstenite",
@@ -2202,7 +2203,6 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 name = "subhasher"
 version = "0.1.0"
 dependencies = [
- "array-bytes",
  "blake2-rfc",
  "byteorder",
  "twox-hash",
@@ -2214,6 +2214,13 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "substorager"
+version = "0.1.0"
+dependencies = [
+ "subhasher",
 ]
 
 [[package]]

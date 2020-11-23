@@ -2,19 +2,22 @@
 use std::convert::{TryFrom, TryInto};
 // --- crates.io ---
 use anyhow::Result as AnyResult;
-use array_bytes::*;
 use async_std::{
 	sync::{self, Receiver, Sender},
 	task::{self, JoinHandle},
 };
-use parity_scale_codec::{Compact, Decode, Encode};
+use parity_scale_codec::{Compact, Decode, Encode, FullCodec};
 use serde::Deserialize;
 use serde_json::Value;
 use subrpcer::{chain, state};
+use substorager::{StorageHasher, StorageType};
 use tracing::trace;
 use tungstenite::{client::IntoClientRequest, Message};
 // --- github.com ---
-use frame_metadata::{DecodeDifferent, RuntimeMetadata, RuntimeMetadataPrefixed};
+use frame_metadata::{
+	DecodeDifferent, RuntimeMetadata, RuntimeMetadataPrefixed, StorageEntryType,
+	StorageHasher as DeprecatedStorageHasher,
+};
 use sp_core::{crypto, sr25519, Pair, H256 as Hash};
 // --- colladar ---
 use crate::error::Error;
@@ -73,25 +76,72 @@ pub type Bytes = Vec<u8>;
 pub type PublicKey = [u8; 32];
 
 // SpecVersion, TxVersion, Genesis, Era, Nonce, Weight, TransactionPayment, EthereumRelayHeaderParcel
-pub type AdditionalSigned = (u32, u32, Hash, Hash, (), (), (), ());
+// pub type DarwiniaAdditionalSigned = (u32, u32, Hash, Hash, (), (), (), ());
 
 pub struct Colladar {
-	pub uri: String,
 	pub signer: sr25519::Pair,
+	pub node: Node,
+}
+impl Colladar {
+	pub async fn init(uri: impl Into<String>, seed: &str) -> AnyResult<Self> {
+		Ok(Self {
+			signer: <sr25519::Pair as crypto::Pair>::from_seed_slice(
+				&array_bytes::bytes(seed).unwrap(),
+			)
+			.map_err(|err| Error::InvalidSeed {
+				seed: seed.into(),
+				err,
+			})
+			.unwrap()
+			.into(),
+			node: Node::init(uri).await?,
+		})
+	}
+
+	pub fn public_key(&self) -> PublicKey {
+		self.signer.public().0
+	}
+
+	pub async fn nonce(&self) -> AnyResult<u32> {
+		let key = array_bytes::hex_str(
+			"0x",
+			self.node
+				.storage_map_key("System", "Account", self.public_key())?,
+		);
+
+		self.node
+			.send(serde_json::to_vec(&state::get_storage(key, <Option<u32>>::None)).unwrap())
+			.await;
+		// let account = serde_json::from_slice::<Value>(&self.node.recv().await?).unwrap()["result"]
+		// 	.as_str()
+		// 	.unwrap();
+		println!(
+			"{}",
+			serde_json::from_slice::<Value>(&self.node.recv().await?).unwrap()["result"]
+				.as_str()
+				.unwrap()
+		);
+
+		unimplemented!()
+	}
+}
+
+pub struct Node {
+	pub uri: String,
 	pub websocket: Websocket,
 	pub genesis_hash: Hash,
 	pub versions: Versions,
 	pub metadata: Metadata,
 }
-impl Colladar {
-	pub async fn init(uri: impl Into<String>, seed: &str) -> AnyResult<Self> {
+impl Node {
+	pub async fn init(uri: impl Into<String>) -> AnyResult<Self> {
 		let uri = uri.into();
 		let websocket = Websocket::connect(&uri)?;
 
 		websocket
 			.send(serde_json::to_vec(&chain::get_block_hash(0u8)).unwrap())
 			.await;
-		let genesis_hash = hex_str_array_unchecked!(
+		let genesis_hash = array_bytes::hex_str_array_unchecked!(
 			serde_json::from_slice::<Value>(&websocket.recv().await?).unwrap()["result"]
 				.as_str()
 				.unwrap(),
@@ -111,7 +161,7 @@ impl Colladar {
 			.send(serde_json::to_vec(&state::get_metadata()).unwrap())
 			.await;
 		let metadata = RuntimeMetadataPrefixed::decode(
-			&mut &*bytes(
+			&mut &*array_bytes::bytes(
 				serde_json::from_slice::<Value>(&websocket.recv().await?).unwrap()["result"]
 					.as_str()
 					.unwrap(),
@@ -125,13 +175,6 @@ impl Colladar {
 
 		Ok(Self {
 			uri,
-			signer: <sr25519::Pair as crypto::Pair>::from_seed_slice(&bytes(seed).unwrap())
-				.map_err(|err| Error::InvalidSeed {
-					seed: seed.into(),
-					err,
-				})
-				.unwrap()
-				.into(),
 			websocket,
 			genesis_hash,
 			versions,
@@ -139,21 +182,47 @@ impl Colladar {
 		})
 	}
 
-	fn public_key(&self) -> PublicKey {
-		self.signer.public().0
+	pub async fn disconnect(self) {
+		self.websocket.disconnect().await;
 	}
 
-	async fn nonce(&self) {}
-}
+	pub async fn send(&self, bytes: Bytes) {
+		self.websocket.send(bytes).await;
+	}
 
-pub struct Node {
-	pub uri: String,
-	pub websocket: Websocket,
-	pub genesis_hash: Hash,
-	pub versions: Versions,
-	pub metadata: Metadata,
+	pub async fn recv(&self) -> AnyResult<Bytes> {
+		Ok(self.websocket.recv().await?)
+	}
+
+	pub fn spec_version(&self) -> u32 {
+		self.versions.spec_version
+	}
+
+	pub fn transaction_version(&self) -> u32 {
+		self.versions.transaction_version
+	}
+
+	pub fn genesis_hash(&self) -> Hash {
+		self.genesis_hash
+	}
+
+	pub fn storage_map_key(
+		&self,
+		module: impl AsRef<str>,
+		item: impl AsRef<str>,
+		key: impl AsRef<[u8]>,
+	) -> AnyResult<Vec<u8>> {
+		self.metadata.storage_map_key(module, item, key)
+	}
+
+	pub fn call(
+		&self,
+		module_name: impl Into<String>,
+		call_name: impl Into<String>,
+	) -> AnyResult<[u32; 2]> {
+		self.metadata.call(module_name, call_name)
+	}
 }
-impl Node {}
 
 pub struct Websocket {
 	pub handle: Option<JoinHandle<AnyResult<()>>>,
@@ -215,6 +284,66 @@ pub struct Metadata {
 	pub modules: Vec<Module>,
 }
 impl Metadata {
+	pub fn storage_prefix(&self, module_name: impl Into<String>) -> AnyResult<&str> {
+		let module_name = module_name.into();
+		let module = self
+			.modules
+			.iter()
+			.find(|module| &module.name == &module_name)
+			.ok_or(Error::ModuleNotFound { module_name })?;
+
+		Ok(&module.storages.prefix)
+	}
+
+	pub fn storage(
+		&self,
+		module_name: impl Into<String>,
+		item_name: impl Into<String>,
+	) -> AnyResult<&Storage> {
+		let module_name = module_name.into();
+		let item_name = item_name.into();
+		let module = self
+			.modules
+			.iter()
+			.find(|module| &module.name == &module_name)
+			.ok_or(Error::ModuleNotFound {
+				module_name: module_name.clone(),
+			})?;
+		let item = module
+			.storages
+			.items
+			.iter()
+			.find(|item| &item.name == &item_name)
+			.ok_or(Error::StorageItemNotFound {
+				module_name,
+				item_name,
+			})?;
+
+		Ok(item)
+	}
+
+	pub fn storage_map_key(
+		&self,
+		module: impl AsRef<str>,
+		item: impl AsRef<str>,
+		key: impl AsRef<[u8]>,
+	) -> AnyResult<Vec<u8>> {
+		let module = module.as_ref();
+		let item = item.as_ref();
+		let prefix = self.storage_prefix(module)?;
+		let storage = self.storage(module, item)?;
+
+		match &storage.r#type {
+			StorageType::Map(hasher) => {
+				Ok(substorager::storage_map_key(prefix, item, (hasher, key)))
+			}
+			r#type => Err(Error::StorageTypeMismatch {
+				expected: "Map".into(),
+				found: r#type.to_owned(),
+			})?,
+		}
+	}
+
 	pub fn call(
 		&self,
 		module_name: impl Into<String>,
@@ -245,6 +374,9 @@ impl TryFrom<RuntimeMetadata> for Metadata {
 	type Error = Error;
 
 	fn try_from(runtime_metadata: RuntimeMetadata) -> Result<Self, Self::Error> {
+		// --- github.com ---
+		use RuntimeMetadata::*;
+
 		macro_rules! err {
 			($found:expr) => {{
 				Err(Error::MetadataVersionMismatch {
@@ -262,25 +394,68 @@ impl TryFrom<RuntimeMetadata> for Metadata {
 					}
 				}};
 		}
+		macro_rules! hasher {
+			($hasher:expr) => {{
+				match $hasher {
+					DeprecatedStorageHasher::Blake2_128 => StorageHasher::Blake2_128,
+					DeprecatedStorageHasher::Blake2_256 => StorageHasher::Blake2_256,
+					DeprecatedStorageHasher::Blake2_128Concat => StorageHasher::Blake2_128Concat,
+					DeprecatedStorageHasher::Twox128 => StorageHasher::Twox128,
+					DeprecatedStorageHasher::Twox256 => StorageHasher::Twox256,
+					DeprecatedStorageHasher::Twox64Concat => StorageHasher::Twox64Concat,
+					DeprecatedStorageHasher::Identity => StorageHasher::Identity,
+					}
+				}};
+		}
 
 		match runtime_metadata {
-			RuntimeMetadata::V0(_) => err!("V0"),
-			RuntimeMetadata::V1(_) => err!("V1"),
-			RuntimeMetadata::V2(_) => err!("V2"),
-			RuntimeMetadata::V3(_) => err!("V3"),
-			RuntimeMetadata::V4(_) => err!("V4"),
-			RuntimeMetadata::V5(_) => err!("V5"),
-			RuntimeMetadata::V6(_) => err!("V6"),
-			RuntimeMetadata::V7(_) => err!("V7"),
-			RuntimeMetadata::V8(_) => err!("V8"),
-			RuntimeMetadata::V9(_) => err!("V9"),
-			RuntimeMetadata::V10(_) => err!("V10"),
-			RuntimeMetadata::V11(_) => err!("V11"),
-			RuntimeMetadata::V12(runtime_metadata) => {
+			V0(_) => err!("V0"),
+			V1(_) => err!("V1"),
+			V2(_) => err!("V2"),
+			V3(_) => err!("V3"),
+			V4(_) => err!("V4"),
+			V5(_) => err!("V5"),
+			V6(_) => err!("V6"),
+			V7(_) => err!("V7"),
+			V8(_) => err!("V8"),
+			V9(_) => err!("V9"),
+			V10(_) => err!("V10"),
+			V11(_) => err!("V11"),
+			V12(runtime_metadata) => {
 				let mut metadata = Self { modules: vec![] };
 
 				for module in inner!(runtime_metadata.modules) {
+					let mut storages = Storages {
+						prefix: Default::default(),
+						items: vec![],
+					};
 					let mut calls = vec![];
+
+					if let Some(wrap_storages) = module.storage {
+						let wrap_storages = inner!(wrap_storages);
+
+						storages.prefix = inner!(wrap_storages.prefix);
+
+						for storage in inner!(wrap_storages.entries) {
+							storages.items.push(Storage {
+								name: inner!(storage.name),
+								r#type: match storage.ty {
+									StorageEntryType::Plain(_) => StorageType::Plain,
+									StorageEntryType::Map { hasher, .. } => {
+										StorageType::Map(hasher!(hasher))
+									}
+									StorageEntryType::DoubleMap {
+										hasher,
+										key2_hasher,
+										..
+									} => StorageType::DoubleMap(
+										hasher!(hasher),
+										hasher!(key2_hasher),
+									),
+								},
+							});
+						}
+					}
 
 					if let Some(wrap_calls) = module.calls {
 						for call in inner!(wrap_calls) {
@@ -292,6 +467,7 @@ impl TryFrom<RuntimeMetadata> for Metadata {
 
 					metadata.modules.push(Module {
 						name: inner!(module.name),
+						storages,
 						calls,
 					});
 				}
@@ -306,7 +482,20 @@ impl TryFrom<RuntimeMetadata> for Metadata {
 pub struct Module {
 	pub name: String,
 	// pub events: Vec<Event>,
+	pub storages: Storages,
 	pub calls: Vec<Call>,
+}
+
+#[derive(Debug)]
+pub struct Storages {
+	pub prefix: String,
+	pub items: Vec<Storage>,
+}
+
+#[derive(Debug)]
+pub struct Storage {
+	pub name: String,
+	pub r#type: StorageType,
 }
 
 #[derive(Debug)]
@@ -315,10 +504,13 @@ pub struct Call {
 }
 
 #[derive(Encode)]
-pub struct SignedPayload<Call: Encode>((Call, Extra, AdditionalSigned));
-impl<Call> SignedPayload<Call>
+pub struct SignedPayload<Call: Encode, AdditionalSigned: FullCodec>(
+	(Call, Extra, AdditionalSigned),
+);
+impl<Call, AdditionalSigned> SignedPayload<Call, AdditionalSigned>
 where
 	Call: Encode,
+	AdditionalSigned: FullCodec,
 {
 	pub fn from_raw(call: Call, extra: Extra, additional_signed: AdditionalSigned) -> Self {
 		Self((call, extra, additional_signed))
@@ -401,16 +593,16 @@ pub async fn test() -> AnyResult<()> {
 	let seed = "0xe5be9a5092b81bca64be81d212e7f2f9eba183bb7a90954f7b76361f6edb5c0a";
 	let colladar = Colladar::init(uri, seed).await?;
 
-	let call = colladar.metadata.call("Balances", "transfer")?;
+	let call = colladar.node.call("Balances", "transfer")?;
 	let extra = Extra(Era::Immortal, Compact(0), Compact(0));
 	let raw_payload = SignedPayload::from_raw(
 		call.clone(),
 		extra.clone(),
 		(
-			colladar.versions.spec_version,
-			colladar.versions.transaction_version,
-			colladar.genesis_hash,
-			colladar.genesis_hash,
+			colladar.node.spec_version(),
+			colladar.node.transaction_version(),
+			colladar.node.genesis_hash(),
+			colladar.node.genesis_hash(),
 			(),
 			(),
 			(),
@@ -427,7 +619,9 @@ pub async fn test() -> AnyResult<()> {
 		extra,
 	};
 
-	colladar.websocket.disconnect().await;
+	colladar.nonce().await?;
+
+	colladar.node.disconnect().await;
 
 	Ok(())
 }
