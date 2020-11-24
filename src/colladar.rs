@@ -1,6 +1,7 @@
 // --- std ---
 use std::{
 	convert::{TryFrom, TryInto},
+	fmt::Display,
 	mem,
 };
 // --- crates.io ---
@@ -15,7 +16,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use subrpcer::{author, chain, state};
 use substorager::{StorageHasher, StorageType};
-use tracing::trace;
+use tracing::{error, info, trace};
 use tungstenite::{client::IntoClientRequest, Message};
 // --- github.com ---
 use frame_metadata::{
@@ -51,7 +52,7 @@ pub trait WebSocket: Sized {
 	type ClientMsg;
 	type NodeMsg;
 
-	fn connect(uri: impl IntoClientRequest) -> AnyResult<Self>;
+	fn connect(uri: impl Display + IntoClientRequest) -> AnyResult<Self>;
 
 	async fn disconnect(self);
 
@@ -113,7 +114,6 @@ pub struct Node {
 	pub uri: String,
 	pub messenger: Messenger,
 	pub excreamer: Excreamer,
-	// pub subscriptor: Messenger,
 	pub genesis_hash: Hash,
 	pub versions: Versions,
 	pub metadata: Metadata,
@@ -240,8 +240,8 @@ impl WebSocket for Messenger {
 	type ClientMsg = Bytes;
 	type NodeMsg = Bytes;
 
-	fn connect(uri: impl IntoClientRequest) -> AnyResult<Self> {
-		trace!("Starting a new connection to the node");
+	fn connect(uri: impl Display + IntoClientRequest) -> AnyResult<Self> {
+		trace!("`Messenger` starting a new connection to `{}`", uri);
 
 		let (client_sender, node_receiver) = sync::channel(1);
 		let (node_sender, client_receiver) = sync::channel(1);
@@ -292,28 +292,74 @@ impl WebSocket for Excreamer {
 	type ClientMsg = (Bytes, ExtrinsicState);
 	type NodeMsg = ();
 
-	fn connect(uri: impl IntoClientRequest) -> AnyResult<Self> {
-		trace!("Starting a new connection to the node");
+	fn connect(uri: impl Display + IntoClientRequest) -> AnyResult<Self> {
+		trace!("`Excreamer` starting a new connection to `{}`", uri);
 
 		let (client_sender, node_receiver) = sync::channel(1);
-		let (mut messenger, response) = tungstenite::connect(uri)?;
+		let (mut excreamer, response) = tungstenite::connect(uri)?;
 
 		for (header, _) in response.headers() {
 			trace!("* {}", header);
 		}
 
 		let handle = task::spawn(async move {
+			let parse = |v: Value| -> (ExtrinsicState, String, String) {
+				let extrinsic_state;
+				let subscription;
+				let mut block_hash = String::new();
+
+				if let Some(subscription_) = v["result"].as_str() {
+					extrinsic_state = ExtrinsicState::Sent;
+					subscription = subscription_.into();
+				} else {
+					let params = &v["params"];
+					let result = &params["result"];
+					let fallback = || {
+						error!("Failed to parse `ExtrinsicState` from `{:?}`", v);
+
+						ExtrinsicState::Ignored
+					};
+
+					extrinsic_state = if let Some(extrinsic_state) = result.as_str() {
+						match extrinsic_state {
+							"ready" => ExtrinsicState::Ready,
+							_ => fallback(),
+						}
+					} else if let Some(block_hash_) = result.get("inBlock") {
+						block_hash = block_hash_.as_str().unwrap().into();
+
+						ExtrinsicState::InBlock
+					} else if let Some(block_hash_) = result.get("finalized") {
+						block_hash = block_hash_.as_str().unwrap().into();
+
+						ExtrinsicState::Finalized
+					} else {
+						fallback()
+					};
+					subscription = params["subscription"].as_str().unwrap().into();
+				}
+
+				(extrinsic_state, subscription, block_hash)
+			};
+
 			loop {
-				let (bytes, extrinsic_state): Self::ClientMsg = node_receiver.recv().await?;
+				let (bytes, expect_extrinsic_state): Self::ClientMsg = node_receiver.recv().await?;
 
-				messenger.write_message(Message::Binary(bytes))?;
+				excreamer.write_message(Message::Binary(bytes))?;
 
-				let ignored_state = extrinsic_state.ignored();
+				let ignored_state = expect_extrinsic_state.ignored();
 
 				loop {
-					println!("{}", messenger.read_message()?.into_text()?);
+					let (extrinsic_state, subscription, block_hash) = parse(
+						serde_json::from_slice::<Value>(&excreamer.read_message()?.into_data())?,
+					);
 
-					if !ignored_state {
+					info!(
+						"`ExtrinsicState({})`: `{:?}({})`",
+						subscription, extrinsic_state, block_hash
+					);
+
+					if ignored_state || extrinsic_state == expect_extrinsic_state {
 						break;
 					}
 				}
@@ -341,16 +387,18 @@ impl WebSocket for Excreamer {
 	}
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum ExtrinsicState {
-	Ignore,
+	Ignored,
+	Sent,
+	Ready,
 	InBlock,
 	Finalized,
 }
 impl ExtrinsicState {
 	pub fn ignored(&self) -> bool {
 		match self {
-			Self::Ignore => true,
+			Self::Ignored => true,
 			_ => false,
 		}
 	}
@@ -735,7 +783,11 @@ pub async fn test() -> AnyResult<()> {
 		))
 		.await;
 
-	colladar.node.messenger.disconnect().await;
+	run().await;
 
 	Ok(())
+}
+
+pub async fn run() {
+	loop {}
 }
