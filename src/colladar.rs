@@ -9,7 +9,7 @@ use async_std::{
 use parity_scale_codec::{Compact, Decode, Encode, FullCodec};
 use serde::Deserialize;
 use serde_json::Value;
-use subrpcer::{chain, state};
+use subrpcer::{author, chain, state};
 use substorager::{StorageHasher, StorageType};
 use tracing::trace;
 use tungstenite::{client::IntoClientRequest, Message};
@@ -22,12 +22,12 @@ use sp_core::{crypto, sr25519, Pair, H256 as Hash};
 // --- colladar ---
 use crate::error::Error;
 
-// #[macro_export]
-// macro_rules! call {
-// 	() => {{
-
-// 	}}
-// }
+#[macro_export]
+macro_rules! call {
+	($call:expr$(, $data:expr)*) => {{
+		($call, $($data)*)
+		}};
+}
 
 // type SignedExtra = (CheckSpecVersion<Runtime>, CheckTxVersion<Runtime>, CheckGenesis<Runtime>, CheckEra<Runtime>, CheckNonce<Runtime>, CheckWeight<Runtime>, ChargeTransactionPayment<Runtime>);
 // #[macro_export]
@@ -74,9 +74,15 @@ use crate::error::Error;
 pub type Bytes = Vec<u8>;
 
 pub type PublicKey = [u8; 32];
+pub type Version = u32;
 
-// SpecVersion, TxVersion, Genesis, Era, Nonce, Weight, TransactionPayment, EthereumRelayHeaderParcel
-// pub type DarwiniaAdditionalSigned = (u32, u32, Hash, Hash, (), (), (), ());
+pub type BlockNumber = u32;
+pub type Index = u32;
+pub type RefCount = u32;
+pub type Balance = u128;
+
+// SpecVersion, TxVersion, Genesis, Era, Index, Weight, TransactionPayment, EthereumRelayHeaderParcel
+// pub type DarwiniaAdditionalSigned = (Version, Version, Hash, Hash, (), (), (), ());
 
 pub struct Colladar {
 	pub signer: sr25519::Pair,
@@ -102,7 +108,7 @@ impl Colladar {
 		self.signer.public().0
 	}
 
-	pub async fn nonce(&self) -> AnyResult<u32> {
+	pub async fn nonce(&self) -> AnyResult<Index> {
 		let key = array_bytes::hex_str(
 			"0x",
 			self.node
@@ -110,19 +116,17 @@ impl Colladar {
 		);
 
 		self.node
-			.send(serde_json::to_vec(&state::get_storage(key, <Option<u32>>::None)).unwrap())
+			.send(
+				serde_json::to_vec(&state::get_storage(key, <Option<BlockNumber>>::None)).unwrap(),
+			)
 			.await;
-		// let account = serde_json::from_slice::<Value>(&self.node.recv().await?).unwrap()["result"]
-		// 	.as_str()
-		// 	.unwrap();
-		println!(
-			"{}",
+		let account = AccountInfo::decode(&mut &*array_bytes::bytes(
 			serde_json::from_slice::<Value>(&self.node.recv().await?).unwrap()["result"]
 				.as_str()
-				.unwrap()
-		);
+				.unwrap(),
+		)?)?;
 
-		unimplemented!()
+		Ok(account.nonce)
 	}
 }
 
@@ -194,11 +198,11 @@ impl Node {
 		Ok(self.websocket.recv().await?)
 	}
 
-	pub fn spec_version(&self) -> u32 {
+	pub fn spec_version(&self) -> Version {
 		self.versions.spec_version
 	}
 
-	pub fn transaction_version(&self) -> u32 {
+	pub fn transaction_version(&self) -> Version {
 		self.versions.transaction_version
 	}
 
@@ -211,7 +215,7 @@ impl Node {
 		module: impl AsRef<str>,
 		item: impl AsRef<str>,
 		key: impl AsRef<[u8]>,
-	) -> AnyResult<Vec<u8>> {
+	) -> AnyResult<Bytes> {
 		self.metadata.storage_map_key(module, item, key)
 	}
 
@@ -219,8 +223,44 @@ impl Node {
 		&self,
 		module_name: impl Into<String>,
 		call_name: impl Into<String>,
-	) -> AnyResult<[u32; 2]> {
+	) -> AnyResult<[u8; 2]> {
 		self.metadata.call(module_name, call_name)
+	}
+
+	pub fn extrinsic(
+		&self,
+		module: impl AsRef<str>,
+		call: impl AsRef<str>,
+		data: impl Clone + Encode,
+		signer: (&sr25519::Pair, Index),
+	) -> AnyResult<String> {
+		let call = call!(self.call(module.as_ref(), call.as_ref())?, data);
+		let extra = Extra(Era::Immortal, Compact(signer.1), Compact(0));
+		let raw_payload = SignedPayload::from_raw(
+			call.clone(),
+			extra.clone(),
+			(
+				self.spec_version(),
+				self.transaction_version(),
+				self.genesis_hash(),
+				self.genesis_hash(),
+				(),
+				(),
+				(),
+				(),
+			),
+		);
+		let signature = raw_payload
+			.using_encoded(|payload| signer.0.sign(payload))
+			.into();
+		let extrinsic = Extrinsic {
+			call,
+			public_key: signer.0.public().0,
+			signature,
+			extra,
+		};
+
+		Ok(extrinsic.encode())
 	}
 }
 
@@ -275,8 +315,8 @@ impl Websocket {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Versions {
-	spec_version: u32,
-	transaction_version: u32,
+	spec_version: Version,
+	transaction_version: Version,
 }
 
 #[derive(Debug)]
@@ -327,7 +367,7 @@ impl Metadata {
 		module: impl AsRef<str>,
 		item: impl AsRef<str>,
 		key: impl AsRef<[u8]>,
-	) -> AnyResult<Vec<u8>> {
+	) -> AnyResult<Bytes> {
 		let module = module.as_ref();
 		let item = item.as_ref();
 		let prefix = self.storage_prefix(module)?;
@@ -348,7 +388,7 @@ impl Metadata {
 		&self,
 		module_name: impl Into<String>,
 		call_name: impl Into<String>,
-	) -> AnyResult<[u32; 2]> {
+	) -> AnyResult<[u8; 2]> {
 		let module_name = module_name.into();
 		let call_name = call_name.into();
 		let module_index = self
@@ -530,23 +570,36 @@ where
 	}
 }
 
-// Era, Nonce, TransactionPayment
-#[derive(Clone, Encode)]
-pub struct Extra(Era, Compact<u32>, Compact<u128>);
+// Era, Index, TransactionPayment
+#[derive(Clone, Debug, Encode)]
+pub struct Extra(Era, Compact<Index>, Compact<Balance>);
 
-#[derive(Clone, Encode)]
+#[derive(Clone, Debug, Encode)]
 pub enum Era {
 	Immortal,
 	Mortal(u64, u64),
 }
 
-pub struct Extrinsic<Call> {
+#[derive(Encode)]
+pub struct Extrinsic<Call>
+where
+	Call: Encode,
+{
 	call: Call,
 	public_key: PublicKey,
 	signature: MultiSignature,
 	extra: Extra,
 }
+impl<Call> Extrinsic<Call>
+where
+	Call: Encode,
+{
+	pub fn encode(&self) -> String {
+		array_bytes::hex_str("0x", Encode::encode(self))
+	}
+}
 
+#[derive(Encode)]
 pub enum MultiSignature {
 	_Ed25519,
 	Sr25519(sr25519::Signature),
@@ -556,6 +609,21 @@ impl From<sr25519::Signature> for MultiSignature {
 	fn from(signature: sr25519::Signature) -> Self {
 		Self::Sr25519(signature)
 	}
+}
+
+#[derive(Debug, Decode)]
+pub struct AccountInfo {
+	pub nonce: Index,
+	pub ref_count: RefCount,
+	pub data: AccountData,
+}
+
+#[derive(Debug, Decode)]
+pub struct AccountData {
+	pub free: Balance,
+	pub reserved: Balance,
+	pub free_kton: Balance,
+	pub reserved_kton: Balance,
 }
 
 // pub struct PublicKey(pub [u8; 32]);
@@ -592,9 +660,8 @@ pub async fn test() -> AnyResult<()> {
 	let uri = "ws://127.0.0.1:9944";
 	let seed = "0xe5be9a5092b81bca64be81d212e7f2f9eba183bb7a90954f7b76361f6edb5c0a";
 	let colladar = Colladar::init(uri, seed).await?;
-
-	let call = colladar.node.call("Balances", "transfer")?;
-	let extra = Extra(Era::Immortal, Compact(0), Compact(0));
+	let call = call!(colladar.node.call("Balances", "transfer")?);
+	let extra = Extra(Era::Immortal, Compact(colladar.nonce().await?), Compact(0));
 	let raw_payload = SignedPayload::from_raw(
 		call.clone(),
 		extra.clone(),
@@ -617,9 +684,33 @@ pub async fn test() -> AnyResult<()> {
 		public_key: colladar.public_key(),
 		signature,
 		extra,
-	};
+	}
+	.encode();
 
-	colladar.nonce().await?;
+	colladar
+		.node
+		.send(serde_json::to_vec(&author::submit_and_watch_extrinsic(&extrinsic)).unwrap())
+		.await;
+	println!(
+		"{}",
+		serde_json::from_slice::<Value>(&colladar.node.recv().await?).unwrap()
+	);
+
+	let extrinsic_1 = colladar.node.extrinsic(
+		"Balances",
+		"transfer",
+		(),
+		(&colladar.signer, colladar.nonce().await?),
+	)?;
+
+	colladar
+		.node
+		.send(serde_json::to_vec(&author::submit_and_watch_extrinsic(&extrinsic)).unwrap())
+		.await;
+	println!(
+		"{}",
+		serde_json::from_slice::<Value>(&colladar.node.recv().await?).unwrap()
+	);
 
 	colladar.node.disconnect().await;
 
