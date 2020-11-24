@@ -24,52 +24,10 @@ use crate::error::Error;
 
 #[macro_export]
 macro_rules! call {
-	($call:expr$(, $data:expr)*) => {{
-		($call, $($data)*)
+	($colladar:expr, $module:expr, $call:expr$(, $data:expr)*) => {{
+		($colladar.node.call($module, $call)?$(, $data)*)
 		}};
 }
-
-// type SignedExtra = (CheckSpecVersion<Runtime>, CheckTxVersion<Runtime>, CheckGenesis<Runtime>, CheckEra<Runtime>, CheckNonce<Runtime>, CheckWeight<Runtime>, ChargeTransactionPayment<Runtime>);
-// #[macro_export]
-// macro_rules! compose_extrinsic_offline {
-//     ($signer: expr,
-//     $call: expr,
-//     $nonce: expr,
-//     $era: expr,
-//     $genesis_hash: expr,
-//     $genesis_or_current_hash: expr,
-//     $runtime_spec_version: expr,
-//     $transaction_version: expr) => {{
-//         use $crate::extrinsic::xt_primitives::*;
-//         use $crate::sp_runtime::generic::Era;
-//         let extra = GenericExtra::new($era, $nonce);
-//         let raw_payload = SignedPayload::from_raw(
-//             $call.clone(),
-//             extra.clone(),
-//             (
-//                 $runtime_spec_version,
-//                 $transaction_version,
-//                 $genesis_hash,
-//                 $genesis_or_current_hash,
-//                 (),
-//                 (),
-//                 (),
-//             ),
-//         );
-
-//         let signature = raw_payload.using_encoded(|payload| $signer.sign(payload));
-
-//         let mut arr: [u8; 32] = Default::default();
-//         arr.clone_from_slice($signer.public().as_ref());
-
-//         UncheckedExtrinsicV4::new_signed(
-//             $call,
-//             GenericAddress::from(PublicKey::from(arr)),
-//             signature.into(),
-//             extra,
-//         )
-//     }};
-// }
 
 pub type Bytes = Vec<u8>;
 
@@ -108,6 +66,7 @@ impl Colladar {
 		self.signer.public().0
 	}
 
+	// TODO: handle null result in rpc
 	pub async fn nonce(&self) -> AnyResult<Index> {
 		let key = array_bytes::hex_str(
 			"0x",
@@ -130,6 +89,7 @@ impl Colladar {
 	}
 }
 
+#[derive(Debug)]
 pub struct Node {
 	pub uri: String,
 	pub websocket: Websocket,
@@ -229,12 +189,9 @@ impl Node {
 
 	pub fn extrinsic(
 		&self,
-		module: impl AsRef<str>,
-		call: impl AsRef<str>,
-		data: impl Clone + Encode,
+		call: impl Clone + Encode,
 		signer: (&sr25519::Pair, Index),
 	) -> AnyResult<String> {
-		let call = call!(self.call(module.as_ref(), call.as_ref())?, data);
 		let extra = Extra(Era::Immortal, Compact(signer.1), Compact(0));
 		let raw_payload = SignedPayload::from_raw(
 			call.clone(),
@@ -247,23 +204,19 @@ impl Node {
 				(),
 				(),
 				(),
-				(),
 			),
 		);
-		let signature = raw_payload
-			.using_encoded(|payload| signer.0.sign(payload))
-			.into();
+		let signature = raw_payload.using_encoded(|payload| signer.0.sign(payload));
 		let extrinsic = Extrinsic {
+			signature: Some((signer.0.public().0, signature.into(), extra)),
 			call,
-			public_key: signer.0.public().0,
-			signature,
-			extra,
 		};
 
 		Ok(extrinsic.encode())
 	}
 }
 
+#[derive(Debug)]
 pub struct Websocket {
 	pub handle: Option<JoinHandle<AnyResult<()>>>,
 	pub sender: Sender<Bytes>,
@@ -585,10 +538,8 @@ pub struct Extrinsic<Call>
 where
 	Call: Encode,
 {
+	signature: Option<(PublicKey, MultiSignature, Extra)>,
 	call: Call,
-	public_key: PublicKey,
-	signature: MultiSignature,
-	extra: Extra,
 }
 impl<Call> Extrinsic<Call>
 where
@@ -658,54 +609,26 @@ pub struct AccountData {
 
 pub async fn test() -> AnyResult<()> {
 	let uri = "ws://127.0.0.1:9944";
-	let seed = "0xe5be9a5092b81bca64be81d212e7f2f9eba183bb7a90954f7b76361f6edb5c0a";
+	let seed = "0xdd1ecfa08665907c3596a39ce087dd3fe030b55c584c0102abff9861406d41ce";
 	let colladar = Colladar::init(uri, seed).await?;
-	let call = call!(colladar.node.call("Balances", "transfer")?);
-	let extra = Extra(Era::Immortal, Compact(colladar.nonce().await?), Compact(0));
-	let raw_payload = SignedPayload::from_raw(
-		call.clone(),
-		extra.clone(),
-		(
-			colladar.node.spec_version(),
-			colladar.node.transaction_version(),
-			colladar.node.genesis_hash(),
-			colladar.node.genesis_hash(),
-			(),
-			(),
-			(),
-			(),
-		),
-	);
-	let signature = raw_payload
-		.using_encoded(|payload| colladar.signer.sign(payload))
-		.into();
-	let extrinsic = Extrinsic {
-		call,
-		public_key: colladar.public_key(),
-		signature,
-		extra,
-	}
-	.encode();
 
 	colladar
 		.node
-		.send(serde_json::to_vec(&author::submit_and_watch_extrinsic(&extrinsic)).unwrap())
-		.await;
-	println!(
-		"{}",
-		serde_json::from_slice::<Value>(&colladar.node.recv().await?).unwrap()
-	);
-
-	let extrinsic_1 = colladar.node.extrinsic(
-		"Balances",
-		"transfer",
-		(),
-		(&colladar.signer, colladar.nonce().await?),
-	)?;
-
-	colladar
-		.node
-		.send(serde_json::to_vec(&author::submit_and_watch_extrinsic(&extrinsic)).unwrap())
+		.send(
+			serde_json::to_vec(&author::submit_and_watch_extrinsic(
+				&colladar.node.extrinsic(
+					call!(
+						colladar,
+						"Balances",
+						"transfer",
+						colladar.public_key(),
+						Compact(1_000_000_000u128)
+					),
+					(&colladar.signer, colladar.nonce().await?),
+				)?,
+			))
+			.unwrap(),
+		)
 		.await;
 	println!(
 		"{}",
