@@ -1,7 +1,11 @@
 // --- std ---
-use std::convert::{TryFrom, TryInto};
+use std::{
+	convert::{TryFrom, TryInto},
+	mem,
+};
 // --- crates.io ---
 use anyhow::Result as AnyResult;
+use async_macros::select;
 use async_std::{
 	sync::{self, Receiver, Sender},
 	task::{self, JoinHandle},
@@ -190,9 +194,11 @@ impl Node {
 	pub fn extrinsic(
 		&self,
 		call: impl Clone + Encode,
-		signer: (&sr25519::Pair, Index),
+		signer: &sr25519::Pair,
+		nonce: Index,
+		tip: Balance,
 	) -> AnyResult<String> {
-		let extra = Extra(Era::Immortal, Compact(signer.1), Compact(0));
+		let extra = Extra(Era::Immortal, Compact(nonce), Compact(tip));
 		let raw_payload = SignedPayload::from_raw(
 			call.clone(),
 			extra.clone(),
@@ -206,9 +212,9 @@ impl Node {
 				(),
 			),
 		);
-		let signature = raw_payload.using_encoded(|payload| signer.0.sign(payload));
+		let signature = raw_payload.using_encoded(|payload| signer.sign(payload));
 		let extrinsic = Extrinsic {
-			signature: Some((signer.0.public().0, signature.into(), extra)),
+			signature: Some((signer.public().0, signature.into(), extra)),
 			call,
 		};
 
@@ -496,7 +502,6 @@ pub struct Call {
 	pub name: String,
 }
 
-#[derive(Encode)]
 pub struct SignedPayload<Call: Encode, AdditionalSigned: FullCodec>(
 	(Call, Extra, AdditionalSigned),
 );
@@ -533,7 +538,6 @@ pub enum Era {
 	Mortal(u64, u64),
 }
 
-#[derive(Encode)]
 pub struct Extrinsic<Call>
 where
 	Call: Encode,
@@ -547,6 +551,48 @@ where
 {
 	pub fn encode(&self) -> String {
 		array_bytes::hex_str("0x", Encode::encode(self))
+	}
+}
+impl<Call> Encode for Extrinsic<Call>
+where
+	Call: Encode,
+{
+	fn encode(&self) -> Vec<u8> {
+		const V4: u8 = 4;
+
+		fn encode_with_vec_prefix<T: Encode, F: Fn(&mut Vec<u8>)>(encoder: F) -> Vec<u8> {
+			let size = mem::size_of::<T>();
+			let reserve = match size {
+				0..=0b0011_1111 => 1,
+				0b0100_0000..=0b0011_1111_1111_1111 => 2,
+				_ => 4,
+			};
+
+			let mut v = Vec::with_capacity(reserve + size);
+			v.resize(reserve, 0);
+			encoder(&mut v);
+
+			let mut length: Vec<()> = Vec::new();
+			length.resize(v.len() - reserve, ());
+			length.using_encoded(|s| {
+				v.splice(0..reserve, s.iter().cloned());
+			});
+
+			v
+		}
+
+		encode_with_vec_prefix::<Self, _>(|v| {
+			match self.signature.as_ref() {
+				Some(s) => {
+					v.push(V4 | 0b1000_0000);
+					s.encode_to(v);
+				}
+				None => {
+					v.push(V4 & 0b0111_1111);
+				}
+			}
+			self.call.encode_to(v);
+		})
 	}
 }
 
@@ -612,23 +658,22 @@ pub async fn test() -> AnyResult<()> {
 	let seed = "0xdd1ecfa08665907c3596a39ce087dd3fe030b55c584c0102abff9861406d41ce";
 	let colladar = Colladar::init(uri, seed).await?;
 
+	let call = call!(
+		colladar,
+		"Balances",
+		"transfer",
+		array_bytes::hex_str_array_unchecked!(
+			"0xb4f7f03bebc56ebe96bc52ea5ed3159d45a0ce3a8d7f082983c33ef133274747",
+			32
+		),
+		Compact(10_000_000_000u128)
+	);
+	let extrinsic = colladar
+		.node
+		.extrinsic(call, &colladar.signer, colladar.nonce().await?, 0)?;
 	colladar
 		.node
-		.send(
-			serde_json::to_vec(&author::submit_and_watch_extrinsic(
-				&colladar.node.extrinsic(
-					call!(
-						colladar,
-						"Balances",
-						"transfer",
-						colladar.public_key(),
-						Compact(1_000_000_000u128)
-					),
-					(&colladar.signer, colladar.nonce().await?),
-				)?,
-			))
-			.unwrap(),
-		)
+		.send(serde_json::to_vec(&author::submit_and_watch_extrinsic(&extrinsic)).unwrap())
 		.await;
 	println!(
 		"{}",
