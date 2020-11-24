@@ -147,16 +147,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "async-macros"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "644a5a8de80f2085a1e7e57cd1544a2a7438f6e003c0790999bd43b92a77cdb2"
-dependencies = [
- "futures-core",
- "pin-utils",
-]
-
-[[package]]
 name = "async-mutex"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -198,6 +188,17 @@ name = "async-task"
 version = "4.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e91831deabf0d6d7ec49552e489aed63b7456a7a3c46cff62adad428110b0af0"
+
+[[package]]
+name = "async-trait"
+version = "0.1.42"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d3a45e77e34375a7923b1e8febb049bb011f064714a8e17a1a616fef01da13d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "atomic-waker"
@@ -409,8 +410,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "array-bytes",
- "async-macros",
  "async-std",
+ "async-trait",
  "frame-metadata",
  "isahc",
  "parity-scale-codec",

@@ -5,11 +5,11 @@ use std::{
 };
 // --- crates.io ---
 use anyhow::Result as AnyResult;
-use async_macros::select;
 use async_std::{
 	sync::{self, Receiver, Sender},
 	task::{self, JoinHandle},
 };
+use async_trait::async_trait;
 use parity_scale_codec::{Compact, Decode, Encode, FullCodec};
 use serde::Deserialize;
 use serde_json::Value;
@@ -46,6 +46,20 @@ pub type Balance = u128;
 // SpecVersion, TxVersion, Genesis, Era, Index, Weight, TransactionPayment, EthereumRelayHeaderParcel
 // pub type DarwiniaAdditionalSigned = (Version, Version, Hash, Hash, (), (), (), ());
 
+#[async_trait]
+pub trait WebSocket: Sized {
+	type ClientMsg;
+	type NodeMsg;
+
+	fn connect(uri: impl IntoClientRequest) -> AnyResult<Self>;
+
+	async fn disconnect(self);
+
+	async fn send(&self, msg: Self::ClientMsg);
+
+	async fn recv(&self) -> AnyResult<Self::NodeMsg>;
+}
+
 pub struct Colladar {
 	pub signer: sr25519::Pair,
 	pub node: Node,
@@ -79,12 +93,13 @@ impl Colladar {
 		);
 
 		self.node
+			.messenger
 			.send(
 				serde_json::to_vec(&state::get_storage(key, <Option<BlockNumber>>::None)).unwrap(),
 			)
 			.await;
 		let account = AccountInfo::decode(&mut &*array_bytes::bytes(
-			serde_json::from_slice::<Value>(&self.node.recv().await?).unwrap()["result"]
+			serde_json::from_slice::<Value>(&self.node.messenger.recv().await?).unwrap()["result"]
 				.as_str()
 				.unwrap(),
 		)?)?;
@@ -96,7 +111,9 @@ impl Colladar {
 #[derive(Debug)]
 pub struct Node {
 	pub uri: String,
-	pub websocket: Websocket,
+	pub messenger: Messenger,
+	pub excreamer: Excreamer,
+	// pub subscriptor: Messenger,
 	pub genesis_hash: Hash,
 	pub versions: Versions,
 	pub metadata: Metadata,
@@ -104,33 +121,34 @@ pub struct Node {
 impl Node {
 	pub async fn init(uri: impl Into<String>) -> AnyResult<Self> {
 		let uri = uri.into();
-		let websocket = Websocket::connect(&uri)?;
+		let messenger = Messenger::connect(&uri)?;
+		let excreamer = Excreamer::connect(&uri)?;
 
-		websocket
+		messenger
 			.send(serde_json::to_vec(&chain::get_block_hash(0u8)).unwrap())
 			.await;
 		let genesis_hash = array_bytes::hex_str_array_unchecked!(
-			serde_json::from_slice::<Value>(&websocket.recv().await?).unwrap()["result"]
+			serde_json::from_slice::<Value>(&messenger.recv().await?).unwrap()["result"]
 				.as_str()
 				.unwrap(),
 			32
 		)
 		.into();
 
-		websocket
+		messenger
 			.send(serde_json::to_vec(&state::get_runtime_version()).unwrap())
 			.await;
 		let versions = serde_json::from_value(
-			serde_json::from_slice::<Value>(&websocket.recv().await?).unwrap()["result"].clone(),
+			serde_json::from_slice::<Value>(&messenger.recv().await?).unwrap()["result"].clone(),
 		)
 		.unwrap();
 
-		websocket
+		messenger
 			.send(serde_json::to_vec(&state::get_metadata()).unwrap())
 			.await;
 		let metadata = RuntimeMetadataPrefixed::decode(
 			&mut &*array_bytes::bytes(
-				serde_json::from_slice::<Value>(&websocket.recv().await?).unwrap()["result"]
+				serde_json::from_slice::<Value>(&messenger.recv().await?).unwrap()["result"]
 					.as_str()
 					.unwrap(),
 			)
@@ -143,23 +161,12 @@ impl Node {
 
 		Ok(Self {
 			uri,
-			websocket,
+			messenger,
+			excreamer,
 			genesis_hash,
 			versions,
 			metadata,
 		})
-	}
-
-	pub async fn disconnect(self) {
-		self.websocket.disconnect().await;
-	}
-
-	pub async fn send(&self, bytes: Bytes) {
-		self.websocket.send(bytes).await;
-	}
-
-	pub async fn recv(&self) -> AnyResult<Bytes> {
-		Ok(self.websocket.recv().await?)
 	}
 
 	pub fn spec_version(&self) -> Version {
@@ -223,18 +230,22 @@ impl Node {
 }
 
 #[derive(Debug)]
-pub struct Websocket {
+pub struct Messenger {
 	pub handle: Option<JoinHandle<AnyResult<()>>>,
 	pub sender: Sender<Bytes>,
 	pub receiver: Receiver<Bytes>,
 }
-impl Websocket {
-	pub fn connect(uri: impl IntoClientRequest) -> AnyResult<Self> {
+#[async_trait]
+impl WebSocket for Messenger {
+	type ClientMsg = Bytes;
+	type NodeMsg = Bytes;
+
+	fn connect(uri: impl IntoClientRequest) -> AnyResult<Self> {
 		trace!("Starting a new connection to the node");
 
 		let (client_sender, node_receiver) = sync::channel(1);
 		let (node_sender, client_receiver) = sync::channel(1);
-		let (mut websocket, response) = tungstenite::connect(uri)?;
+		let (mut messenger, response) = tungstenite::connect(uri)?;
 
 		for (header, _) in response.headers() {
 			trace!("* {}", header);
@@ -242,9 +253,9 @@ impl Websocket {
 
 		let handle = task::spawn(async move {
 			loop {
-				websocket.write_message(Message::Binary(node_receiver.recv().await?))?;
+				messenger.write_message(Message::Binary(node_receiver.recv().await?))?;
 				node_sender
-					.send(websocket.read_message()?.into_data())
+					.send(messenger.read_message()?.into_data())
 					.await;
 			}
 		});
@@ -256,18 +267,92 @@ impl Websocket {
 		})
 	}
 
-	pub async fn disconnect(self) {
+	async fn disconnect(self) {
 		if let Some(handle) = self.handle {
 			handle.cancel().await;
 		}
 	}
 
-	pub async fn send(&self, bytes: Bytes) {
-		self.sender.send(bytes).await;
+	async fn send(&self, msg: Self::ClientMsg) {
+		self.sender.send(msg).await;
 	}
 
-	pub async fn recv(&self) -> AnyResult<Bytes> {
+	async fn recv(&self) -> AnyResult<Self::NodeMsg> {
 		Ok(self.receiver.recv().await?)
+	}
+}
+
+#[derive(Debug)]
+pub struct Excreamer {
+	pub handle: Option<JoinHandle<AnyResult<()>>>,
+	pub sender: Sender<(Bytes, ExtrinsicState)>,
+}
+#[async_trait]
+impl WebSocket for Excreamer {
+	type ClientMsg = (Bytes, ExtrinsicState);
+	type NodeMsg = ();
+
+	fn connect(uri: impl IntoClientRequest) -> AnyResult<Self> {
+		trace!("Starting a new connection to the node");
+
+		let (client_sender, node_receiver) = sync::channel(1);
+		let (mut messenger, response) = tungstenite::connect(uri)?;
+
+		for (header, _) in response.headers() {
+			trace!("* {}", header);
+		}
+
+		let handle = task::spawn(async move {
+			loop {
+				let (bytes, extrinsic_state): Self::ClientMsg = node_receiver.recv().await?;
+
+				messenger.write_message(Message::Binary(bytes))?;
+
+				let ignored_state = extrinsic_state.ignored();
+
+				loop {
+					println!("{}", messenger.read_message()?.into_text()?);
+
+					if !ignored_state {
+						break;
+					}
+				}
+			}
+		});
+
+		Ok(Self {
+			handle: Some(handle),
+			sender: client_sender,
+		})
+	}
+
+	async fn disconnect(self) {
+		if let Some(handle) = self.handle {
+			handle.cancel().await;
+		}
+	}
+
+	async fn send(&self, msg: Self::ClientMsg) {
+		self.sender.send(msg).await;
+	}
+
+	async fn recv(&self) -> AnyResult<Self::NodeMsg> {
+		Ok(())
+	}
+}
+
+#[derive(Debug)]
+pub enum ExtrinsicState {
+	Ignore,
+	InBlock,
+	Finalized,
+}
+impl ExtrinsicState {
+	pub fn ignored(&self) -> bool {
+		match self {
+			Self::Ignore => true,
+			_ => false,
+		}
 	}
 }
 
@@ -623,41 +708,10 @@ pub struct AccountData {
 	pub reserved_kton: Balance,
 }
 
-// pub struct PublicKey(pub [u8; 32]);
-// impl From<[u8; 32]> for PublicKey {
-// 	fn from(bytes: [u8; 32]) -> Self {
-// 		Self(bytes)
-// 	}
-// }
-// impl TryFrom<&[u8]> for PublicKey {
-// 	type Error = Error;
-
-// 	fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
-// 		let length = bytes.len();
-// 		let mut fixed_bytes = [0; 32];
-
-// 		fixed_bytes.copy_from_slice(bytes);
-
-// 		if length == 32 {
-// 			Ok(Self(fixed_bytes))
-// 		} else {
-// 			Err(Self::Error::InvalidPublicLength { length })
-// 		}
-// 	}
-// }
-// impl TryFrom<Vec<u8>> for PublicKey {
-// 	type Error = Error;
-
-// 	fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
-// 		TryFrom::try_from(bytes.as_slice())
-// 	}
-// }
-
 pub async fn test() -> AnyResult<()> {
 	let uri = "ws://127.0.0.1:9944";
 	let seed = "0xdd1ecfa08665907c3596a39ce087dd3fe030b55c584c0102abff9861406d41ce";
 	let colladar = Colladar::init(uri, seed).await?;
-
 	let call = call!(
 		colladar,
 		"Balances",
@@ -671,16 +725,17 @@ pub async fn test() -> AnyResult<()> {
 	let extrinsic = colladar
 		.node
 		.extrinsic(call, &colladar.signer, colladar.nonce().await?, 0)?;
+
 	colladar
 		.node
-		.send(serde_json::to_vec(&author::submit_and_watch_extrinsic(&extrinsic)).unwrap())
+		.excreamer
+		.send((
+			serde_json::to_vec(&author::submit_and_watch_extrinsic(&extrinsic)).unwrap(),
+			ExtrinsicState::Finalized,
+		))
 		.await;
-	println!(
-		"{}",
-		serde_json::from_slice::<Value>(&colladar.node.recv().await?).unwrap()
-	);
 
-	colladar.node.disconnect().await;
+	colladar.node.messenger.disconnect().await;
 
 	Ok(())
 }
