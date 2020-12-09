@@ -89,7 +89,6 @@ impl Colladar {
 		self.signer.public.to_bytes()
 	}
 
-	// TODO: handle null result in rpc
 	pub async fn nonce(&self) -> AnyResult<Index> {
 		let key = array_bytes::hex_str(
 			"0x",
