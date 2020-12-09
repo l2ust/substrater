@@ -17,10 +17,8 @@ serde              = { version = "1.0.118", features = ["derive"] }
 serde_json         = { version = "1.0.60" }
 subcryptor         = { version = "0.1.0", features = ["full-crypto"], path = "../subalfred/subcryptor" }
 subhasher          = { version = "0.1.0", path = "../subalfred/subhasher" }
+submetadatan       = { version = "0.1.0", features = ["codec", "simplify-metadata"], path = "../subalfred/submetadatan" }
 subrpcer           = { version = "0.1.0", path = "../subalfred/subrpcer" }
-substorager        = { version = "0.1.0", path = "../subalfred/substorager" }
 thiserror          = { version = "1.0.22" }
 tracing            = { version = "0.1.22" }
 tungstenite        = { version = "0.11.1" }
-# github.com
-frame-metadata = { version = "12.0.0", git = "https://github.com/darwinia-network/substrate.git", branch = "common-library" }

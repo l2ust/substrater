@@ -1,32 +1,11 @@
 // --- crates.io ---
-use substorager::StorageType;
+use submetadatan::Error as MetadataError;
 use thiserror::Error as ThisError;
 
 #[derive(Debug, ThisError)]
 pub enum Error {
-	#[error("Module `{}` not found", module_name)]
-	ModuleNotFound { module_name: String },
-	#[error(
-		"Storage item `{}` not found under module `{}`",
-		module_name,
-		item_name
-	)]
-	StorageItemNotFound {
-		module_name: String,
-		item_name: String,
-	},
-	#[error("Storage type expected `{}` but found `{:?}`", expected, found)]
-	StorageTypeMismatch {
-		expected: String,
-		found: StorageType,
-	},
-	#[error("Call `{}` not found under module `{}`", module_name, call_name)]
-	CallNotFound {
-		module_name: String,
-		call_name: String,
-	},
-	#[error("Metadata version expected `{}` but found `{}`", expected, found)]
-	MetadataVersionMismatch { expected: String, found: String },
+	#[error("Metadata error")]
+	Metadata(#[from] MetadataError),
 	#[error("Crypto error")]
 	Crypto(#[from] CryptoError),
 	#[error("Json error")]
