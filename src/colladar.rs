@@ -7,13 +7,17 @@ use std::{
 // --- crates.io ---
 use anyhow::Result as AnyResult;
 use async_std::{
-	sync::{self, Receiver, Sender},
+	channel::{self, Receiver, Sender},
 	task::{self, JoinHandle},
 };
 use async_trait::async_trait;
 use parity_scale_codec::{Compact, Decode, Encode, FullCodec};
 use serde::Deserialize;
 use serde_json::Value;
+use subcryptor::{
+	schnorrkel::{self, ExpansionMode, Keypair, MiniSecretKey},
+	PublicKey, Signature, SIGNING_CTX,
+};
 use subrpcer::{author, chain, state};
 use substorager::{StorageHasher, StorageType};
 use tracing::{error, info, trace};
@@ -23,9 +27,8 @@ use frame_metadata::{
 	DecodeDifferent, RuntimeMetadata, RuntimeMetadataPrefixed, StorageEntryType,
 	StorageHasher as DeprecatedStorageHasher,
 };
-use sp_core::{crypto, sr25519, Pair, H256 as Hash};
 // --- colladar ---
-use crate::error::Error;
+use crate::error::{Error, JsonError, SignatureError};
 
 #[macro_export]
 macro_rules! call {
@@ -36,11 +39,10 @@ macro_rules! call {
 
 pub type Bytes = Vec<u8>;
 
-pub type PublicKey = [u8; 32];
-pub type Version = u32;
-
 pub type BlockNumber = u32;
+pub type Hash = [u8; 32];
 pub type Index = u32;
+pub type Version = u32;
 pub type RefCount = u32;
 pub type Balance = u128;
 
@@ -56,33 +58,35 @@ pub trait WebSocket: Sized {
 
 	async fn disconnect(self);
 
-	async fn send(&self, msg: Self::ClientMsg);
+	async fn send(&self, msg: Self::ClientMsg) -> AnyResult<()>;
 
 	async fn recv(&self) -> AnyResult<Self::NodeMsg>;
 }
 
 pub struct Colladar {
-	pub signer: sr25519::Pair,
+	pub signer: Keypair,
 	pub node: Node,
 }
 impl Colladar {
 	pub async fn init(uri: impl Into<String>, seed: &str) -> AnyResult<Self> {
+		let signer = MiniSecretKey::from_bytes(&array_bytes::bytes(seed).unwrap())
+			.map_err(|_| SignatureError::BytesLengthMismatch)?
+			.expand_to_keypair(ExpansionMode::Ed25519);
+
+		trace!("Seed: {}", seed);
+		trace!(
+			"Public key: {:?}",
+			array_bytes::hex_str("0x", signer.public.to_bytes())
+		);
+
 		Ok(Self {
-			signer: <sr25519::Pair as crypto::Pair>::from_seed_slice(
-				&array_bytes::bytes(seed).unwrap(),
-			)
-			.map_err(|err| Error::InvalidSeed {
-				seed: seed.into(),
-				err,
-			})
-			.unwrap()
-			.into(),
+			signer,
 			node: Node::init(uri).await?,
 		})
 	}
 
 	pub fn public_key(&self) -> PublicKey {
-		self.signer.public().0
+		self.signer.public.to_bytes()
 	}
 
 	// TODO: handle null result in rpc
@@ -98,11 +102,12 @@ impl Colladar {
 			.send(
 				serde_json::to_vec(&state::get_storage(key, <Option<BlockNumber>>::None)).unwrap(),
 			)
-			.await;
+			.await?;
+
 		let account = AccountInfo::decode(&mut &*array_bytes::bytes(
 			serde_json::from_slice::<Value>(&self.node.messenger.recv().await?).unwrap()["result"]
 				.as_str()
-				.unwrap(),
+				.ok_or(JsonError::ExpectedStr)?,
 		)?)?;
 
 		Ok(account.nonce)
@@ -126,7 +131,7 @@ impl Node {
 
 		messenger
 			.send(serde_json::to_vec(&chain::get_block_hash(0u8)).unwrap())
-			.await;
+			.await?;
 		let genesis_hash = array_bytes::hex_str_array_unchecked!(
 			serde_json::from_slice::<Value>(&messenger.recv().await?).unwrap()["result"]
 				.as_str()
@@ -137,7 +142,7 @@ impl Node {
 
 		messenger
 			.send(serde_json::to_vec(&state::get_runtime_version()).unwrap())
-			.await;
+			.await?;
 		let versions = serde_json::from_value(
 			serde_json::from_slice::<Value>(&messenger.recv().await?).unwrap()["result"].clone(),
 		)
@@ -145,7 +150,7 @@ impl Node {
 
 		messenger
 			.send(serde_json::to_vec(&state::get_metadata()).unwrap())
-			.await;
+			.await?;
 		let metadata = RuntimeMetadataPrefixed::decode(
 			&mut &*array_bytes::bytes(
 				serde_json::from_slice::<Value>(&messenger.recv().await?).unwrap()["result"]
@@ -201,7 +206,7 @@ impl Node {
 	pub fn extrinsic(
 		&self,
 		call: impl Clone + Encode,
-		signer: &sr25519::Pair,
+		signer: &Keypair,
 		nonce: Index,
 		tip: Balance,
 	) -> AnyResult<String> {
@@ -219,9 +224,12 @@ impl Node {
 				(),
 			),
 		);
-		let signature = raw_payload.using_encoded(|payload| signer.sign(payload));
+		let signature = raw_payload.using_encoded(|payload| {
+			let context = schnorrkel::signing_context(SIGNING_CTX);
+			signer.sign(context.bytes(payload)).to_bytes()
+		});
 		let extrinsic = Extrinsic {
-			signature: Some((signer.public().0, signature.into(), extra)),
+			signature: Some((signer.public.to_bytes(), signature.into(), extra)),
 			call,
 		};
 
@@ -243,8 +251,8 @@ impl WebSocket for Messenger {
 	fn connect(uri: impl Display + IntoClientRequest) -> AnyResult<Self> {
 		trace!("`Messenger` starting a new connection to `{}`", uri);
 
-		let (client_sender, node_receiver) = sync::channel(1);
-		let (node_sender, client_receiver) = sync::channel(1);
+		let (client_sender, node_receiver) = channel::unbounded();
+		let (node_sender, client_receiver) = channel::unbounded();
 		let (mut messenger, response) = tungstenite::connect(uri)?;
 
 		for (header, _) in response.headers() {
@@ -256,7 +264,7 @@ impl WebSocket for Messenger {
 				messenger.write_message(Message::Binary(node_receiver.recv().await?))?;
 				node_sender
 					.send(messenger.read_message()?.into_data())
-					.await;
+					.await?;
 			}
 		});
 
@@ -273,8 +281,8 @@ impl WebSocket for Messenger {
 		}
 	}
 
-	async fn send(&self, msg: Self::ClientMsg) {
-		self.sender.send(msg).await;
+	async fn send(&self, msg: Self::ClientMsg) -> AnyResult<()> {
+		Ok(self.sender.send(msg).await?)
 	}
 
 	async fn recv(&self) -> AnyResult<Self::NodeMsg> {
@@ -295,7 +303,7 @@ impl WebSocket for Excreamer {
 	fn connect(uri: impl Display + IntoClientRequest) -> AnyResult<Self> {
 		trace!("`Excreamer` starting a new connection to `{}`", uri);
 
-		let (client_sender, node_receiver) = sync::channel(1);
+		let (client_sender, node_receiver) = channel::unbounded();
 		let (mut excreamer, response) = tungstenite::connect(uri)?;
 
 		for (header, _) in response.headers() {
@@ -378,8 +386,8 @@ impl WebSocket for Excreamer {
 		}
 	}
 
-	async fn send(&self, msg: Self::ClientMsg) {
-		self.sender.send(msg).await;
+	async fn send(&self, msg: Self::ClientMsg) -> AnyResult<()> {
+		Ok(self.sender.send(msg).await?)
 	}
 
 	async fn recv(&self) -> AnyResult<Self::NodeMsg> {
@@ -653,7 +661,7 @@ where
 	{
 		self.0.using_encoded(|payload| {
 			if payload.len() > 256 {
-				f(&sp_core::blake2_256(payload))
+				f(&subhasher::blake2_256(payload))
 			} else {
 				f(payload)
 			}
@@ -732,11 +740,11 @@ where
 #[derive(Encode)]
 pub enum MultiSignature {
 	_Ed25519,
-	Sr25519(sr25519::Signature),
+	Sr25519(Signature),
 	_Ecdsa,
 }
-impl From<sr25519::Signature> for MultiSignature {
-	fn from(signature: sr25519::Signature) -> Self {
+impl From<Signature> for MultiSignature {
+	fn from(signature: Signature) -> Self {
 		Self::Sr25519(signature)
 	}
 }
@@ -758,14 +766,14 @@ pub struct AccountData {
 
 pub async fn test() -> AnyResult<()> {
 	let uri = "ws://127.0.0.1:9944";
-	let seed = "0xdd1ecfa08665907c3596a39ce087dd3fe030b55c584c0102abff9861406d41ce";
+	let seed = "0xe5be9a5092b81bca64be81d212e7f2f9eba183bb7a90954f7b76361f6edb5c0a";
 	let colladar = Colladar::init(uri, seed).await?;
 	let call = call!(
 		colladar,
 		"Balances",
 		"transfer",
 		array_bytes::hex_str_array_unchecked!(
-			"0xb4f7f03bebc56ebe96bc52ea5ed3159d45a0ce3a8d7f082983c33ef133274747",
+			"0xe659a7a1628cdd93febc04a4e0646ea20e9f5f0ce097d9a05290d4a9e054df4e",
 			32
 		),
 		Compact(10_000_000_000u128)
@@ -781,7 +789,7 @@ pub async fn test() -> AnyResult<()> {
 			serde_json::to_vec(&author::submit_and_watch_extrinsic(&extrinsic)).unwrap(),
 			ExtrinsicState::Finalized,
 		))
-		.await;
+		.await?;
 
 	run().await;
 
