@@ -1,6 +1,6 @@
 pub mod error;
-pub mod ethereum;
 pub mod extrinsic;
+pub mod frame;
 pub mod substrater;
 pub mod r#type;
 pub mod websocket;

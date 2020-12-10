@@ -15,6 +15,10 @@ use tracing::trace;
 use crate::{
 	error::{CryptoError, SerdeJsonError, SignatureError, SubstraterResult},
 	extrinsic::*,
+	frame::{
+		balances::Balance,
+		system::{BlockNumber, Hash, Index, RefCount, Version},
+	},
 	r#type::*,
 	websocket::*,
 };
