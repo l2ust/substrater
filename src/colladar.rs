@@ -19,7 +19,7 @@ use subrpcer::{author, chain, state};
 use tracing::{error, info, trace};
 use tungstenite::{client::IntoClientRequest, Message};
 // --- colladar ---
-use crate::error::{JsonError, SignatureError};
+use crate::error::{AsyncError, Error, JsonError, SignatureError};
 
 #[macro_export]
 macro_rules! call {
@@ -29,6 +29,7 @@ macro_rules! call {
 }
 
 pub type Bytes = Vec<u8>;
+pub type SubstraterResult<T> = Result<T, Error>;
 
 pub type BlockNumber = u32;
 pub type Hash = [u8; 32];
@@ -45,13 +46,13 @@ pub trait WebSocket: Sized {
 	type ClientMsg;
 	type NodeMsg;
 
-	fn connect(uri: impl Display + IntoClientRequest) -> AnyResult<Self>;
+	fn connect(uri: impl Display + IntoClientRequest) -> SubstraterResult<Self>;
 
 	async fn disconnect(self);
 
-	async fn send(&self, msg: Self::ClientMsg) -> AnyResult<()>;
+	async fn send(&self, msg: Self::ClientMsg) -> SubstraterResult<()>;
 
-	async fn recv(&self) -> AnyResult<Self::NodeMsg>;
+	async fn recv(&self) -> SubstraterResult<Self::NodeMsg>;
 }
 
 pub struct Colladar {
@@ -114,7 +115,7 @@ pub struct Node {
 	pub metadata: Metadata,
 }
 impl Node {
-	pub async fn init(uri: impl Into<String>) -> AnyResult<Self> {
+	pub async fn init(uri: impl Into<String>) -> SubstraterResult<Self> {
 		let uri = uri.into();
 		let messenger = Messenger::connect(&uri)?;
 		let excreamer = Excreamer::connect(&uri)?;
@@ -181,16 +182,16 @@ impl Node {
 		module: impl AsRef<str>,
 		item: impl AsRef<str>,
 		key: impl AsRef<[u8]>,
-	) -> AnyResult<Bytes> {
-		self.metadata.storage_map_key(module, item, key)
+	) -> SubstraterResult<Bytes> {
+		Ok(self.metadata.storage_map_key(module, item, key)?)
 	}
 
 	pub fn call(
 		&self,
 		module_name: impl Into<String>,
 		call_name: impl Into<String>,
-	) -> AnyResult<[u8; 2]> {
-		self.metadata.call(module_name, call_name)
+	) -> SubstraterResult<[u8; 2]> {
+		Ok(self.metadata.call(module_name, call_name)?)
 	}
 
 	pub fn extrinsic(
@@ -238,7 +239,7 @@ impl WebSocket for Messenger {
 	type ClientMsg = Bytes;
 	type NodeMsg = Bytes;
 
-	fn connect(uri: impl Display + IntoClientRequest) -> AnyResult<Self> {
+	fn connect(uri: impl Display + IntoClientRequest) -> SubstraterResult<Self> {
 		trace!("`Messenger` starting a new connection to `{}`", uri);
 
 		let (client_sender, node_receiver) = channel::unbounded();
@@ -271,12 +272,12 @@ impl WebSocket for Messenger {
 		}
 	}
 
-	async fn send(&self, msg: Self::ClientMsg) -> AnyResult<()> {
-		Ok(self.sender.send(msg).await?)
+	async fn send(&self, msg: Self::ClientMsg) -> SubstraterResult<()> {
+		Ok(self.sender.send(msg).await.map_err(AsyncError::from)?)
 	}
 
-	async fn recv(&self) -> AnyResult<Self::NodeMsg> {
-		Ok(self.receiver.recv().await?)
+	async fn recv(&self) -> SubstraterResult<Self::NodeMsg> {
+		Ok(self.receiver.recv().await.map_err(AsyncError::from)?)
 	}
 }
 
@@ -290,7 +291,7 @@ impl WebSocket for Excreamer {
 	type ClientMsg = (Bytes, ExtrinsicState);
 	type NodeMsg = ();
 
-	fn connect(uri: impl Display + IntoClientRequest) -> AnyResult<Self> {
+	fn connect(uri: impl Display + IntoClientRequest) -> SubstraterResult<Self> {
 		trace!("`Excreamer` starting a new connection to `{}`", uri);
 
 		let (client_sender, node_receiver) = channel::unbounded();
@@ -376,11 +377,11 @@ impl WebSocket for Excreamer {
 		}
 	}
 
-	async fn send(&self, msg: Self::ClientMsg) -> AnyResult<()> {
-		Ok(self.sender.send(msg).await?)
+	async fn send(&self, msg: Self::ClientMsg) -> SubstraterResult<()> {
+		Ok(self.sender.send(msg).await.map_err(AsyncError::from)?)
 	}
 
-	async fn recv(&self) -> AnyResult<Self::NodeMsg> {
+	async fn recv(&self) -> SubstraterResult<Self::NodeMsg> {
 		Ok(())
 	}
 }
