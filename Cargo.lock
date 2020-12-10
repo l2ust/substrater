@@ -10,12 +10,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "anyhow"
-version = "1.0.35"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c0df63cb2955042487fad3aefd2c6e3ae7389ac5dc1beb28921de0b69f779d4"
-
-[[package]]
 name = "array-bytes"
 version = "0.1.0"
 dependencies = [
@@ -341,28 +335,6 @@ name = "cfg-if"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
-
-[[package]]
-name = "colladar"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "array-bytes",
- "async-std",
- "async-trait",
- "isahc",
- "parity-scale-codec",
- "pretty_env_logger",
- "serde",
- "serde_json",
- "subcryptor",
- "subhasher",
- "submetadatan",
- "subrpcer",
- "thiserror",
- "tracing",
- "tungstenite",
-]
 
 [[package]]
 name = "concurrent-queue"
@@ -1364,6 +1336,7 @@ version = "0.1.0"
 dependencies = [
  "base58",
  "blake2-rfc",
+ "parity-scale-codec",
  "schnorrkel",
 ]
 
@@ -1399,6 +1372,27 @@ version = "0.1.0"
 dependencies = [
  "parity-scale-codec",
  "subhasher",
+]
+
+[[package]]
+name = "substrater"
+version = "0.1.0"
+dependencies = [
+ "array-bytes",
+ "async-std",
+ "async-trait",
+ "isahc",
+ "parity-scale-codec",
+ "pretty_env_logger",
+ "serde",
+ "serde_json",
+ "subcryptor",
+ "subhasher",
+ "submetadatan",
+ "subrpcer",
+ "thiserror",
+ "tracing",
+ "tungstenite",
 ]
 
 [[package]]
