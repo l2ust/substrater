@@ -69,14 +69,14 @@ impl Substrater {
 		);
 
 		self.node
-			.messenger
+			.postman
 			.send(
 				serde_json::to_vec(&state::get_storage(key, <Option<BlockNumber>>::None)).unwrap(),
 			)
 			.await?;
 
 		let account = AccountInfo::decode(&mut &*array_bytes::bytes(
-			serde_json::from_slice::<Value>(&self.node.messenger.recv().await?).unwrap()["result"]
+			serde_json::from_slice::<Value>(&self.node.postman.recv().await?).unwrap()["result"]
 				.as_str()
 				.ok_or(SerdeJsonError::ExpectedStr)?,
 		)?)?;
@@ -88,8 +88,8 @@ impl Substrater {
 #[derive(Debug)]
 pub struct Node {
 	pub uri: String,
-	pub messenger: Messenger,
-	pub excreamer: Excreamer,
+	pub postman: Postman,
+	pub salesman: Salesman,
 	pub genesis_hash: Hash,
 	pub versions: Versions,
 	pub metadata: Metadata,
@@ -97,34 +97,41 @@ pub struct Node {
 impl Node {
 	pub async fn init(uri: impl Into<String>) -> SubstraterResult<Self> {
 		let uri = uri.into();
-		let messenger = Messenger::connect(&uri)?;
-		let excreamer = Excreamer::connect(&uri)?;
+		let websocket2 = Websocket2::connect(&uri).await?;
+		let postman = Postman::connect(&uri)?;
+		let salesman = Salesman::connect(&uri)?;
 
-		messenger
+		websocket2
+			.send(
+				serde_json::to_vec(&chain::get_block_hash_with_id(
+					0u8,
+					websocket2.rpc_id().await,
+				))
+				.unwrap(),
+			)
+			.await?;
+
+		postman
 			.send(serde_json::to_vec(&chain::get_block_hash(0u8)).unwrap())
 			.await?;
-		let genesis_hash = array_bytes::hex_str_array_unchecked!(
-			serde_json::from_slice::<Value>(&messenger.recv().await?).unwrap()["result"]
-				.as_str()
-				.unwrap(),
-			32
-		)
-		.into();
+		let result = serde_json::from_slice::<Value>(&postman.recv().await?).unwrap();
+		let genesis_hash =
+			array_bytes::hex_str_array_unchecked!(result["result"].as_str().unwrap(), 32).into();
 
-		messenger
+		postman
 			.send(serde_json::to_vec(&state::get_runtime_version()).unwrap())
 			.await?;
 		let versions = serde_json::from_value(
-			serde_json::from_slice::<Value>(&messenger.recv().await?).unwrap()["result"].clone(),
+			serde_json::from_slice::<Value>(&postman.recv().await?).unwrap()["result"].clone(),
 		)
 		.unwrap();
 
-		messenger
+		postman
 			.send(serde_json::to_vec(&state::get_metadata()).unwrap())
 			.await?;
 		let metadata = RuntimeMetadataPrefixed::decode(
 			&mut &*array_bytes::bytes(
-				serde_json::from_slice::<Value>(&messenger.recv().await?).unwrap()["result"]
+				serde_json::from_slice::<Value>(&postman.recv().await?).unwrap()["result"]
 					.as_str()
 					.unwrap(),
 			)
@@ -137,8 +144,8 @@ impl Node {
 
 		Ok(Self {
 			uri,
-			messenger,
-			excreamer,
+			postman,
+			salesman,
 			genesis_hash,
 			versions,
 			metadata,
@@ -255,7 +262,7 @@ pub async fn test() -> SubstraterResult<()> {
 
 	substrater
 		.node
-		.excreamer
+		.salesman
 		.send((
 			serde_json::to_vec(&author::submit_and_watch_extrinsic(&extrinsic)).unwrap(),
 			ExtrinsicState::Finalized,

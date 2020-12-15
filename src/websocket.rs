@@ -3,11 +3,17 @@ use std::fmt::Display;
 // --- crates.io ---
 use async_std::{
 	channel::{self, Receiver, Sender},
+	sync::Mutex,
 	task::{self, JoinHandle},
 };
 use async_trait::async_trait;
+use async_tungstenite::async_std as tungstenite_async_std;
+use futures::{
+	future::{self, Either},
+	pin_mut, SinkExt, StreamExt,
+};
 use serde_json::Value;
-use tracing::{error, info, trace};
+use tracing::{debug, error, info, trace};
 use tungstenite::{client::IntoClientRequest, Message};
 // --- substrater ---
 use crate::{
@@ -15,6 +21,110 @@ use crate::{
 	extrinsic::ExtrinsicState,
 	r#type::Bytes,
 };
+
+pub struct Websocket2 {
+	pub handle: Option<JoinHandle<SubstraterResult<()>>>,
+	pub sender: Sender<Bytes>,
+	pub rpc_id: RpcId,
+	pub rpc_results: Arc<Mutex<Vec<(u32, Value)>>>,
+	// pub subscriptions: Arc<Mutex<Vec<(String, Option<Bytes>)>>>,
+}
+impl Websocket2 {
+	pub async fn connect(uri: impl Display + IntoClientRequest + Unpin) -> SubstraterResult<Self> {
+		trace!("`Websocket2` starting a new connection to `{}`", uri);
+
+		let (client_sender, node_receiver) = channel::unbounded();
+		let rpc_results = Arc::new(Mutex::new(vec![]));
+		let (websocket2, response) = tungstenite_async_std::connect_async(uri).await?;
+		let (mut write, mut read) = websocket2.split();
+
+		for (header, _) in response.headers() {
+			trace!("* {}", header);
+		}
+
+		let handle = task::spawn(async move {
+			let mut read_future = read.next();
+
+			loop {
+				let recv_future = node_receiver.recv();
+
+				pin_mut!(recv_future);
+
+				match future::select(recv_future, read_future).await {
+					Either::Left((msg, read_future_continue)) => {
+						let msg = msg.map_err(AsyncError::from)?;
+
+						debug!("{:?}", msg);
+
+						write.send(Message::from(msg)).await?;
+
+						read_future = read_future_continue;
+					}
+					Either::Right((msg, _)) => {
+						match msg {
+							Some(msg) => {
+								let msg = msg?;
+								let msg =
+									serde_json::from_slice::<Value>(&msg.into_data()).unwrap();
+
+								debug!("{:?}", msg);
+
+								read_future = read.next();
+							}
+							None => break,
+						};
+					}
+				}
+			}
+
+			Ok(())
+		});
+
+		Ok(Self {
+			handle: Some(handle),
+			sender: client_sender,
+			rpc_id: RpcId(Mutex::new(1)),
+			rpc_results,
+			// subscriptions,
+		})
+	}
+
+	pub async fn disconnect(self) {
+		if let Some(handle) = self.handle {
+			handle.cancel().await;
+		}
+	}
+
+	pub async fn send(&self, msg: Bytes) -> SubstraterResult<()> {
+		Ok(self.sender.send(msg).await.map_err(AsyncError::from)?)
+	}
+
+	// pub async fn recv_rpc_result(&self, id: Bytes) -> SubstraterResult<()> {
+	// Ok(self.sender.send(msg).await.map_err(AsyncError::from)?)
+	// }
+
+	// pub async fn recv_subscriptions(&self)
+
+	pub async fn rpc_id(&self) -> u32 {
+		self.rpc_id.get().await
+	}
+}
+
+pub struct RpcId(Mutex<u32>);
+impl RpcId {
+	pub async fn get(&self) -> u32 {
+		let mut mutex = self.0.lock().await;
+		let id = *mutex;
+
+		if id == u32::max_value() {
+			*mutex = 1;
+		} else {
+			*mutex += 1;
+		}
+
+		id
+	}
+}
 
 #[async_trait]
 pub trait Websocket: Sized {
@@ -31,22 +141,22 @@ pub trait Websocket: Sized {
 }
 
 #[derive(Debug)]
-pub struct Messenger {
+pub struct Postman {
 	pub handle: Option<JoinHandle<SubstraterResult<()>>>,
 	pub sender: Sender<Bytes>,
 	pub receiver: Receiver<Bytes>,
 }
 #[async_trait]
-impl Websocket for Messenger {
+impl Websocket for Postman {
 	type ClientMsg = Bytes;
 	type NodeMsg = Bytes;
 
 	fn connect(uri: impl Display + IntoClientRequest) -> SubstraterResult<Self> {
-		trace!("`Messenger` starting a new connection to `{}`", uri);
+		trace!("`Postman` starting a new connection to `{}`", uri);
 
 		let (client_sender, node_receiver) = channel::unbounded();
 		let (node_sender, client_receiver) = channel::unbounded();
-		let (mut messenger, response) = tungstenite::connect(uri)?;
+		let (mut postman, response) = tungstenite::connect(uri)?;
 
 		for (header, _) in response.headers() {
 			trace!("* {}", header);
@@ -54,11 +164,11 @@ impl Websocket for Messenger {
 
 		let handle = task::spawn(async move {
 			loop {
-				messenger.write_message(Message::Binary(
+				postman.write_message(Message::Binary(
 					node_receiver.recv().await.map_err(AsyncError::from)?,
 				))?;
 				node_sender
-					.send(messenger.read_message()?.into_data())
+					.send(postman.read_message()?.into_data())
 					.await
 					.map_err(AsyncError::from)?;
 			}
@@ -87,20 +197,20 @@ impl Websocket for Messenger {
 }
 
 #[derive(Debug)]
-pub struct Excreamer {
+pub struct Salesman {
 	pub handle: Option<JoinHandle<SubstraterResult<()>>>,
 	pub sender: Sender<(Bytes, ExtrinsicState)>,
 }
 #[async_trait]
-impl Websocket for Excreamer {
+impl Websocket for Salesman {
 	type ClientMsg = (Bytes, ExtrinsicState);
 	type NodeMsg = ();
 
 	fn connect(uri: impl Display + IntoClientRequest) -> SubstraterResult<Self> {
-		trace!("`Excreamer` starting a new connection to `{}`", uri);
+		trace!("`Salesman` starting a new connection to `{}`", uri);
 
 		let (client_sender, node_receiver) = channel::unbounded();
-		let (mut excreamer, response) = tungstenite::connect(uri)?;
+		let (mut salesman, response) = tungstenite::connect(uri)?;
 
 		for (header, _) in response.headers() {
 			trace!("* {}", header);
@@ -150,13 +260,14 @@ impl Websocket for Excreamer {
 				let (bytes, expect_extrinsic_state): Self::ClientMsg =
 					node_receiver.recv().await.map_err(AsyncError::from)?;
 
-				excreamer.write_message(Message::Binary(bytes))?;
+				salesman.write_message(Message::Binary(bytes))?;
 
 				let ignored_state = expect_extrinsic_state.ignored();
 
 				loop {
 					let (extrinsic_state, subscription, block_hash) = parse(
-						serde_json::from_slice::<Value>(&excreamer.read_message()?.into_data()).map_err(SerdeJsonError::from)?,
+						serde_json::from_slice::<Value>(&salesman.read_message()?.into_data())
+							.map_err(SerdeJsonError::from)?,
 					);
 
 					info!(
@@ -191,3 +302,43 @@ impl Websocket for Excreamer {
 		Ok(())
 	}
 }
+
+// #[derive(Debug)]
+// pub struct Fisherman {
+// 	pub handle: Option<JoinHandle<SubstraterResult<()>>>,
+// 	pub receiver: Receiver<Bytes>,
+// }
+// #[async_trait]
+// impl Websocket for Fisherman {
+// 	type ClientMsg = Bytes;
+// 	type NodeMsg = Bytes;
+
+// 	fn connect(uri: impl Display + IntoClientRequest) -> SubstraterResult<Self> {
+// 		trace!("`Fisherman` starting a new connection to `{}`", uri);
+
+// 		let (client_sender, node_receiver) = channel::unbounded();
+// 		let (mut salesman, response) = tungstenite::connect(uri)?;
+
+// 		for (header, _) in response.headers() {
+// 			trace!("* {}", header);
+// 		}
+
+// 		let handle = task::spawn(async move {});
+
+// 		unimplemented!()
+// 	}
+
+// 	async fn disconnect(self) {
+// 		if let Some(handle) = self.handle {
+// 			handle.cancel().await;
+// 		}
+// 	}
+
+// 	async fn send(&self, msg: Self::ClientMsg) -> SubstraterResult<()> {
+// 		Ok(self.sender.send(msg).await.map_err(AsyncError::from)?)
+// 	}
+
+// 	async fn recv(&self) -> SubstraterResult<Self::NodeMsg> {
+// 		Ok(self.receiver.recv().await.map_err(AsyncError::from)?)
+// 	}
+// }
