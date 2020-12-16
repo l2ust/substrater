@@ -3,11 +3,11 @@ use std::fmt::Debug;
 // --- crates.io ---
 use array_bytes::Error as ArrayBytesError;
 use async_std::channel::{RecvError, SendError};
+use async_tungstenite::tungstenite::Error as WebsocketError;
 use parity_scale_codec::Error as CodecError;
 use serde_json::Error as RawSerdeJsonError;
 use submetadatan::Error as MetadataError;
 use thiserror::Error as ThisError;
-use tungstenite::Error as WebsocketError;
 
 pub type SubstraterResult<T> = Result<T, Error>;
 

@@ -1,9 +1,9 @@
 // --- std ---
 use std::convert::TryInto;
 // --- crates.io ---
+use futures::future;
 use parity_scale_codec::{Compact, Decode, Encode};
 use serde::Deserialize;
-use serde_json::Value;
 use subcryptor::{
 	schnorrkel::{self, ExpansionMode, Keypair, MiniSecretKey},
 	PublicKey, SIGNING_CTX,
@@ -67,16 +67,22 @@ impl Substrater {
 			self.node
 				.storage_map_key("System", "Account", self.public_key())?,
 		);
+		let rpc_id = self.node.websocket.rpc_id().await;
 
 		self.node
-			.postman
+			.websocket
 			.send(
-				serde_json::to_vec(&state::get_storage(key, <Option<BlockNumber>>::None)).unwrap(),
+				serde_json::to_vec(&state::get_storage_with_id(
+					key,
+					<Option<BlockNumber>>::None,
+					rpc_id,
+				))
+				.unwrap(),
 			)
 			.await?;
 
 		let account = AccountInfo::decode(&mut &*array_bytes::bytes(
-			serde_json::from_slice::<Value>(&self.node.postman.recv().await?).unwrap()["result"]
+			self.node.websocket.take_rpc_result_of(&rpc_id).await["result"]
 				.as_str()
 				.ok_or(SerdeJsonError::ExpectedStr)?,
 		)?)?;
@@ -88,8 +94,7 @@ impl Substrater {
 #[derive(Debug)]
 pub struct Node {
 	pub uri: String,
-	pub postman: Postman,
-	pub salesman: Salesman,
+	pub websocket: Websocket,
 	pub genesis_hash: Hash,
 	pub versions: Versions,
 	pub metadata: Metadata,
@@ -97,41 +102,45 @@ pub struct Node {
 impl Node {
 	pub async fn init(uri: impl Into<String>) -> SubstraterResult<Self> {
 		let uri = uri.into();
-		let websocket2 = Websocket2::connect(&uri).await?;
-		let postman = Postman::connect(&uri)?;
-		let salesman = Salesman::connect(&uri)?;
+		let websocket = Websocket::connect(&uri).await?;
+		let get_block_hash_rpc_id = websocket.rpc_id().await;
+		let get_runtime_version_rpc_id = get_block_hash_rpc_id + 1;
+		let get_metadata_rpc_id = get_runtime_version_rpc_id + 1;
 
-		websocket2
-			.send(
-				serde_json::to_vec(&chain::get_block_hash_with_id(
-					0u8,
-					websocket2.rpc_id().await,
+		future::join_all(vec![
+			websocket.send(
+				serde_json::to_vec(&chain::get_block_hash_with_id(0u8, get_block_hash_rpc_id))
+					.unwrap(),
+			),
+			websocket.send(
+				serde_json::to_vec(&state::get_runtime_version_with_id(
+					get_runtime_version_rpc_id,
 				))
 				.unwrap(),
-			)
-			.await?;
+			),
+			websocket.send(
+				serde_json::to_vec(&state::get_metadata_with_id(get_metadata_rpc_id)).unwrap(),
+			),
+		])
+		.await;
 
-		postman
-			.send(serde_json::to_vec(&chain::get_block_hash(0u8)).unwrap())
-			.await?;
-		let result = serde_json::from_slice::<Value>(&postman.recv().await?).unwrap();
-		let genesis_hash =
-			array_bytes::hex_str_array_unchecked!(result["result"].as_str().unwrap(), 32).into();
-
-		postman
-			.send(serde_json::to_vec(&state::get_runtime_version()).unwrap())
-			.await?;
+		let genesis_hash = array_bytes::hex_str_array_unchecked!(
+			websocket.take_rpc_result_of(&get_block_hash_rpc_id).await["result"]
+				.as_str()
+				.unwrap(),
+			32
+		)
+		.into();
 		let versions = serde_json::from_value(
-			serde_json::from_slice::<Value>(&postman.recv().await?).unwrap()["result"].clone(),
+			websocket
+				.take_rpc_result_of(&get_runtime_version_rpc_id)
+				.await["result"]
+				.take(),
 		)
 		.unwrap();
-
-		postman
-			.send(serde_json::to_vec(&state::get_metadata()).unwrap())
-			.await?;
 		let metadata = RuntimeMetadataPrefixed::decode(
 			&mut &*array_bytes::bytes(
-				serde_json::from_slice::<Value>(&postman.recv().await?).unwrap()["result"]
+				websocket.take_rpc_result_of(&get_metadata_rpc_id).await["result"]
 					.as_str()
 					.unwrap(),
 			)
@@ -144,8 +153,7 @@ impl Node {
 
 		Ok(Self {
 			uri,
-			postman,
-			salesman,
+			websocket,
 			genesis_hash,
 			versions,
 			metadata,
@@ -259,14 +267,19 @@ pub async fn test() -> SubstraterResult<()> {
 		substrater.nonce().await?,
 		0,
 	);
+	let rpc_id = substrater.node.websocket.rpc_id().await;
 
 	substrater
 		.node
-		.salesman
-		.send((
-			serde_json::to_vec(&author::submit_and_watch_extrinsic(&extrinsic)).unwrap(),
+		.websocket
+		.send_and_watch_extrinsic(
+			rpc_id,
+			serde_json::to_vec(&author::submit_and_watch_extrinsic_with_id(
+				&extrinsic, rpc_id,
+			))
+			.unwrap(),
 			ExtrinsicState::Finalized,
-		))
+		)
 		.await?;
 
 	run().await;
