@@ -110,9 +110,6 @@ pub enum ExtrinsicState {
 }
 impl ExtrinsicState {
 	pub fn ignored(&self) -> bool {
-		match self {
-			Self::Ignored => true,
-			_ => false,
-		}
+		matches!(self, Self::Ignored)
 	}
 }

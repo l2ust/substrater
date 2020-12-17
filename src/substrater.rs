@@ -129,8 +129,7 @@ impl Node {
 				.as_str()
 				.unwrap(),
 			32
-		)
-		.into();
+		);
 		let versions = serde_json::from_value(
 			websocket
 				.take_rpc_result_of(&get_runtime_version_rpc_id)
@@ -280,5 +279,6 @@ pub async fn test() -> SubstraterResult<()> {
 }
 
 pub async fn run() {
+	#[allow(clippy::empty_loop)]
 	loop {}
 }

@@ -138,7 +138,7 @@ impl Websocket {
 		let subscription_id = self.take_rpc_result_of(&rpc_id).await["result"]
 			.as_str()
 			.unwrap()
-			.into();
+			.to_owned();
 		let unwatch_extrinsic_future = self.send(
 			serde_json::to_vec(&author::unwatch_extrinsic_with_id(
 				&subscription_id,
@@ -158,17 +158,15 @@ impl Websocket {
 			let result = &subscription["params"]["result"];
 			let (extrinsic_state, block_hash) = if result.is_string() {
 				(ExtrinsicState::Ready, "")
+			} else if let Some(block_hash) = result.get("inBlock") {
+				(ExtrinsicState::InBlock, block_hash.as_str().unwrap())
+			} else if let Some(block_hash) = result.get("finalized") {
+				(ExtrinsicState::Finalized, block_hash.as_str().unwrap())
 			} else {
-				if let Some(block_hash) = result.get("inBlock") {
-					(ExtrinsicState::InBlock, block_hash.as_str().unwrap())
-				} else if let Some(block_hash) = result.get("finalized") {
-					(ExtrinsicState::Finalized, block_hash.as_str().unwrap())
-				} else {
-					// TODO
-					error!("{:?}", subscription);
+				// TODO
+				error!("{:?}", subscription);
 
-					(ExtrinsicState::Ignored, "")
-				}
+				(ExtrinsicState::Ignored, "")
 			};
 
 			info!(
@@ -211,10 +209,7 @@ impl Websocket {
 		}
 	}
 
-	pub async fn try_take_subscription_of(
-		&self,
-		subscription_id: &SubscriptionId,
-	) -> Option<Value> {
+	pub async fn try_take_subscription_of(&self, subscription_id: &str) -> Option<Value> {
 		let mut ref_subscriptions = self.subscriptions.lock().await;
 
 		if let Some(position) = ref_subscriptions
@@ -227,7 +222,7 @@ impl Websocket {
 		}
 	}
 
-	pub async fn take_subscription_of(&self, subscription_id: &SubscriptionId) -> Value {
+	pub async fn take_subscription_of(&self, subscription_id: &str) -> Value {
 		loop {
 			if let Some(subscription) = self.try_take_subscription_of(subscription_id).await {
 				return subscription;
