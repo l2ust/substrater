@@ -9,7 +9,7 @@ use subcryptor::{
 	PublicKey, SIGNING_CTX,
 };
 use submetadatan::{Metadata, RuntimeMetadataPrefixed};
-use subrpcer::{author, chain, state};
+use subrpcer::{chain, state};
 use tracing::trace;
 // --- substrater ---
 use crate::{
@@ -104,8 +104,8 @@ impl Node {
 		let uri = uri.into();
 		let websocket = Websocket::connect(&uri).await?;
 		let get_block_hash_rpc_id = websocket.rpc_id().await;
-		let get_runtime_version_rpc_id = get_block_hash_rpc_id + 1;
-		let get_metadata_rpc_id = get_runtime_version_rpc_id + 1;
+		let get_runtime_version_rpc_id = websocket.rpc_id().await;
+		let get_metadata_rpc_id = websocket.rpc_id().await;
 
 		future::join_all(vec![
 			websocket.send(
@@ -267,19 +267,11 @@ pub async fn test() -> SubstraterResult<()> {
 		substrater.nonce().await?,
 		0,
 	);
-	let rpc_id = substrater.node.websocket.rpc_id().await;
 
 	substrater
 		.node
 		.websocket
-		.send_and_watch_extrinsic(
-			rpc_id,
-			serde_json::to_vec(&author::submit_and_watch_extrinsic_with_id(
-				&extrinsic, rpc_id,
-			))
-			.unwrap(),
-			ExtrinsicState::Finalized,
-		)
+		.send_and_watch_extrinsic(extrinsic.as_str(), ExtrinsicState::Finalized)
 		.await?;
 
 	run().await;

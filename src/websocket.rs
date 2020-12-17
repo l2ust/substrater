@@ -14,6 +14,7 @@ use futures::{
 	future::{self, Either},
 	pin_mut, SinkExt, StreamExt,
 };
+use serde::Serialize;
 use serde_json::Value;
 use subrpcer::author;
 use tracing::{debug, error, info, trace};
@@ -121,18 +122,30 @@ impl Websocket {
 
 	pub async fn send_and_watch_extrinsic(
 		&self,
-		rpc_id: RpcId,
-		msg: Bytes,
+		extrinsic: impl Serialize,
 		expect_extrinsic_state: ExtrinsicState,
 	) -> SubstraterResult<()> {
-		self.send(msg).await?;
+		let rpc_id = self.rpc_id().await;
+
+		self.send(
+			serde_json::to_vec(&author::submit_and_watch_extrinsic_with_id(
+				&extrinsic, rpc_id,
+			))
+			.unwrap(),
+		)
+		.await?;
 
 		let subscription_id = self.take_rpc_result_of(&rpc_id).await["result"]
 			.as_str()
 			.unwrap()
 			.into();
-		let unwatch_extrinsic_future =
-			self.send(serde_json::to_vec(&author::unwatch_extrinsic(&subscription_id)).unwrap());
+		let unwatch_extrinsic_future = self.send(
+			serde_json::to_vec(&author::unwatch_extrinsic_with_id(
+				&subscription_id,
+				self.rpc_id().await,
+			))
+			.unwrap(),
+		);
 
 		if expect_extrinsic_state.ignored() {
 			unwatch_extrinsic_future.await?;
