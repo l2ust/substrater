@@ -1,5 +1,5 @@
 // --- std ---
-use std::fmt::Display;
+use std::{borrow::Borrow, fmt::Display};
 // --- crates.io ---
 use async_std::{
 	channel::{self, Sender},
@@ -116,11 +116,19 @@ impl Websocket {
 		}
 	}
 
-	pub async fn send(&self, msg: Bytes) -> SubstraterResult<()> {
-		Ok(self.sender.send(msg).await.map_err(AsyncError::from)?)
+	pub async fn send(&self, msg: impl Into<Bytes>) -> SubstraterResult<()> {
+		Ok(self
+			.sender
+			.send(msg.into())
+			.await
+			.map_err(AsyncError::from)?)
 	}
 
-	pub async fn send_and_watch_extrinsic(
+	pub async fn subscribe_storage(&self, storage_key: impl AsRef<[u8]>) -> SubstraterResult<()> {
+		Ok(())
+	}
+
+	pub async fn submit_and_watch_extrinsic(
 		&self,
 		extrinsic: impl Serialize,
 		expect_extrinsic_state: ExtrinsicState,
@@ -188,12 +196,12 @@ impl Websocket {
 		self.rpc_id.get().await
 	}
 
-	pub async fn try_take_rpc_result_of(&self, rpc_id: &RpcId) -> Option<Value> {
+	pub async fn try_take_rpc_result_of(&self, rpc_id: impl Borrow<RpcId>) -> Option<Value> {
 		let mut ref_rpc_results = self.rpc_results.lock().await;
 
 		if let Some(position) = ref_rpc_results
 			.iter()
-			.position(|(rpc_id_, _)| rpc_id_ == rpc_id)
+			.position(|(rpc_id_, _)| rpc_id_ == rpc_id.borrow())
 		{
 			Some(ref_rpc_results.remove(position).1)
 		} else {
@@ -201,7 +209,9 @@ impl Websocket {
 		}
 	}
 
-	pub async fn take_rpc_result_of(&self, rpc_id: &RpcId) -> Value {
+	pub async fn take_rpc_result_of(&self, rpc_id: impl Borrow<RpcId>) -> Value {
+		let rpc_id = rpc_id.borrow();
+
 		loop {
 			if let Some(rpc_result) = self.try_take_rpc_result_of(rpc_id).await {
 				return rpc_result;
@@ -209,12 +219,15 @@ impl Websocket {
 		}
 	}
 
-	pub async fn try_take_subscription_of(&self, subscription_id: &str) -> Option<Value> {
+	pub async fn try_take_subscription_of(
+		&self,
+		subscription_id: impl AsRef<str>,
+	) -> Option<Value> {
 		let mut ref_subscriptions = self.subscriptions.lock().await;
 
 		if let Some(position) = ref_subscriptions
 			.iter()
-			.position(|(subscription_id_, _)| subscription_id_ == subscription_id)
+			.position(|(subscription_id_, _)| subscription_id_ == subscription_id.as_ref())
 		{
 			Some(ref_subscriptions.remove(position).1)
 		} else {
@@ -222,7 +235,9 @@ impl Websocket {
 		}
 	}
 
-	pub async fn take_subscription_of(&self, subscription_id: &str) -> Value {
+	pub async fn take_subscription_of(&self, subscription_id: impl AsRef<str>) -> Value {
+		let subscription_id = subscription_id.as_ref();
+
 		loop {
 			if let Some(subscription) = self.try_take_subscription_of(subscription_id).await {
 				return subscription;

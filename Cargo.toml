@@ -19,5 +19,6 @@ subcryptor         = { version = "0.1.0", features = ["codec", "full-crypto"], p
 subhasher          = { version = "0.1.0", path = "../subalfred/subhasher" }
 submetadatan       = { version = "0.1.0", features = ["codec", "simplify-metadata"], path = "../subalfred/submetadatan" }
 subrpcer           = { version = "0.1.0", path = "../subalfred/subrpcer" }
+substorager        = { version = "0.1.0", path = "../subalfred/substorager" }
 thiserror          = { version = "1.0.22" }
 tracing            = { version = "0.1.22" }

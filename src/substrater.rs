@@ -270,7 +270,12 @@ pub async fn test() -> SubstraterResult<()> {
 	substrater
 		.node
 		.websocket
-		.send_and_watch_extrinsic(extrinsic.as_str(), ExtrinsicState::Finalized)
+		.submit_and_watch_extrinsic(extrinsic.as_str(), ExtrinsicState::Finalized)
+		.await?;
+	substrater
+		.node
+		.websocket
+		.subscribe_storage(&substorager::storage_key(b"System", b"Events"))
 		.await?;
 
 	run().await;
