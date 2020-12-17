@@ -1,5 +1,9 @@
 // --- std ---
-use std::{borrow::Borrow, fmt::Display};
+use std::{
+	borrow::Borrow,
+	collections::{HashMap, HashSet},
+	fmt::Display,
+};
 // --- crates.io ---
 use async_std::{
 	channel::{self, Sender},
@@ -16,7 +20,7 @@ use futures::{
 };
 use serde::Serialize;
 use serde_json::Value;
-use subrpcer::author;
+use subrpcer::{author, state};
 use tracing::{debug, error, info, trace};
 // --- substrater ---
 use crate::{
@@ -30,16 +34,18 @@ pub struct Websocket {
 	pub handle: Option<JoinHandle<SubstraterResult<()>>>,
 	pub sender: Sender<Bytes>,
 	pub rpc_id: CurrentRpcId,
-	pub rpc_results: Arc<Mutex<Vec<(RpcId, Value)>>>,
-	pub subscriptions: Arc<Mutex<Vec<(SubscriptionId, Value)>>>,
+	pub rpc_results: Arc<Mutex<HashMap<RpcId, Value>>>,
+	pub subscription_ids: Mutex<HashSet<SubscriptionId>>,
+	pub subscriptions: Arc<Mutex<HashMap<SubscriptionId, Value>>>,
 }
+// TODO: polish function visible
 impl Websocket {
 	pub async fn connect(uri: impl Display + IntoClientRequest + Unpin) -> SubstraterResult<Self> {
 		trace!("`Websocket` starting a new connection to `{}`", uri);
 
 		let (client_sender, node_receiver) = channel::unbounded();
-		let rpc_results = Arc::new(Mutex::new(vec![]));
-		let subscriptions = Arc::new(Mutex::new(vec![]));
+		let rpc_results = Arc::new(Mutex::new(HashMap::new()));
+		let subscriptions = Arc::new(Mutex::new(HashMap::new()));
 		let (websocket, response) = tungstenite_async_std::connect_async(uri).await?;
 		let (mut write, mut read) = websocket.split();
 
@@ -77,14 +83,14 @@ impl Websocket {
 								debug!("{:?}", msg);
 
 								if let Some(rpc_id) = msg["id"].as_u64() {
-									rpc_results_cloned.lock().await.push((rpc_id as _, msg));
+									rpc_results_cloned.lock().await.insert(rpc_id as _, msg);
 								} else if let Some(subscription_id) =
 									msg["params"]["subscription"].as_str()
 								{
 									subscriptions_cloned
 										.lock()
 										.await
-										.push((subscription_id.into(), msg));
+										.insert(subscription_id.into(), msg);
 								} else {
 									// TODO
 									error!("{:?}", msg);
@@ -106,6 +112,7 @@ impl Websocket {
 			sender: client_sender,
 			rpc_id: CurrentRpcId(Mutex::new(1)),
 			rpc_results,
+			subscription_ids: Mutex::new(HashSet::new()),
 			subscriptions,
 		})
 	}
@@ -124,8 +131,29 @@ impl Websocket {
 			.map_err(AsyncError::from)?)
 	}
 
-	pub async fn subscribe_storage(&self, storage_key: impl AsRef<[u8]>) -> SubstraterResult<()> {
-		Ok(())
+	pub async fn subscribe_storage(
+		&self,
+		storage_keys: impl AsRef<str>,
+	) -> SubstraterResult<SubscriptionId> {
+		let rpc_id = self.rpc_id().await;
+
+		self.send(
+			serde_json::to_vec(&state::subscribe_storage_with_id(
+				[storage_keys.as_ref()],
+				rpc_id,
+			))
+			.unwrap(),
+		)
+		.await?;
+
+		let subscription_id = self.take_rpc_result_of(&rpc_id).await["result"]
+			.as_str()
+			.unwrap()
+			.into();
+
+		self.add_subscription_id(&subscription_id).await;
+
+		Ok(subscription_id)
 	}
 
 	pub async fn submit_and_watch_extrinsic(
@@ -147,13 +175,10 @@ impl Websocket {
 			.as_str()
 			.unwrap()
 			.to_owned();
-		let unwatch_extrinsic_future = self.send(
-			serde_json::to_vec(&author::unwatch_extrinsic_with_id(
-				&subscription_id,
-				self.rpc_id().await,
-			))
-			.unwrap(),
-		);
+
+		self.add_subscription_id(&subscription_id).await;
+
+		let unwatch_extrinsic_future = self.unwatch_extrinsic(&subscription_id);
 
 		if expect_extrinsic_state.ignored() {
 			unwatch_extrinsic_future.await?;
@@ -192,21 +217,57 @@ impl Websocket {
 		Ok(())
 	}
 
+	pub async fn unwatch_extrinsic(
+		&self,
+		subscription_id: impl AsRef<str>,
+	) -> SubstraterResult<()> {
+		let rpc_id = self.rpc_id().await;
+		let subscription_id = subscription_id.as_ref();
+
+		self.send(
+			serde_json::to_vec(&author::unwatch_extrinsic_with_id(subscription_id, rpc_id))
+				.unwrap(),
+		)
+		.await?;
+
+		// TODO: dead lock if unwatch failed
+		self.take_rpc_result_of(rpc_id).await;
+
+		self.remove_subscription_id(subscription_id).await;
+
+		Ok(())
+	}
+
+	pub async fn unsubscribe_storage(
+		&self,
+		subscription_id: impl AsRef<str>,
+	) -> SubstraterResult<()> {
+		let rpc_id = self.rpc_id().await;
+		let subscription_id = subscription_id.as_ref();
+
+		self.send(
+			serde_json::to_vec(&state::unsubscribe_storage_with_id(subscription_id, rpc_id))
+				.unwrap(),
+		)
+		.await?;
+
+		// TODO: dead lock if unsubscribe failed
+		self.take_rpc_result_of(rpc_id).await;
+		self.take_subscription_of(subscription_id).await;
+
+		self.remove_subscription_id(subscription_id).await;
+
+		Ok(())
+	}
+
+	// pub async fn unsubscribe_all(&self) {}
+
 	pub async fn rpc_id(&self) -> RpcId {
 		self.rpc_id.get().await
 	}
 
 	pub async fn try_take_rpc_result_of(&self, rpc_id: impl Borrow<RpcId>) -> Option<Value> {
-		let mut ref_rpc_results = self.rpc_results.lock().await;
-
-		if let Some(position) = ref_rpc_results
-			.iter()
-			.position(|(rpc_id_, _)| rpc_id_ == rpc_id.borrow())
-		{
-			Some(ref_rpc_results.remove(position).1)
-		} else {
-			None
-		}
+		self.rpc_results.lock().await.remove(rpc_id.borrow())
 	}
 
 	pub async fn take_rpc_result_of(&self, rpc_id: impl Borrow<RpcId>) -> Value {
@@ -219,20 +280,28 @@ impl Websocket {
 		}
 	}
 
+	pub async fn add_subscription_id(&self, subscription_id: impl Into<SubscriptionId>) {
+		self.subscription_ids
+			.lock()
+			.await
+			.insert(subscription_id.into());
+	}
+
+	pub async fn remove_subscription_id(&self, subscription_id: impl AsRef<str>) {
+		self.subscription_ids
+			.lock()
+			.await
+			.remove(subscription_id.as_ref());
+	}
+
 	pub async fn try_take_subscription_of(
 		&self,
 		subscription_id: impl AsRef<str>,
 	) -> Option<Value> {
-		let mut ref_subscriptions = self.subscriptions.lock().await;
-
-		if let Some(position) = ref_subscriptions
-			.iter()
-			.position(|(subscription_id_, _)| subscription_id_ == subscription_id.as_ref())
-		{
-			Some(ref_subscriptions.remove(position).1)
-		} else {
-			None
-		}
+		self.subscriptions
+			.lock()
+			.await
+			.remove(subscription_id.as_ref())
 	}
 
 	pub async fn take_subscription_of(&self, subscription_id: impl AsRef<str>) -> Value {

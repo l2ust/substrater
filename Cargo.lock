@@ -106,6 +106,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-macros"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "644a5a8de80f2085a1e7e57cd1544a2a7438f6e003c0790999bd43b92a77cdb2"
+dependencies = [
+ "futures-core",
+ "pin-utils",
+]
+
+[[package]]
 name = "async-mutex"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1486,6 +1496,7 @@ dependencies = [
 name = "substorager"
 version = "0.1.0"
 dependencies = [
+ "array-bytes",
  "parity-scale-codec",
  "subhasher",
 ]
@@ -1495,6 +1506,7 @@ name = "substrater"
 version = "0.1.0"
 dependencies = [
  "array-bytes",
+ "async-macros",
  "async-std",
  "async-tungstenite",
  "futures",

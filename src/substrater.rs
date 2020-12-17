@@ -267,16 +267,38 @@ pub async fn test() -> SubstraterResult<()> {
 		0,
 	);
 
+	let submit_and_watch_extrinsic_future = substrater
+		.node
+		.websocket
+		.submit_and_watch_extrinsic(extrinsic.as_str(), ExtrinsicState::Finalized);
+	let subscribe_storage_future =
+		substrater
+			.node
+			.websocket
+			.subscribe_storage(substorager::hex_storage_key_with_prefix(
+				"0x", b"System", b"Events",
+			));
+
+	let (_, subscription_id) =
+		async_macros::join!(submit_and_watch_extrinsic_future, subscribe_storage_future).await;
 	substrater
 		.node
 		.websocket
-		.submit_and_watch_extrinsic(extrinsic.as_str(), ExtrinsicState::Finalized)
+		.unsubscribe_storage(subscription_id?)
 		.await?;
-	substrater
-		.node
-		.websocket
-		.subscribe_storage(&substorager::storage_key(b"System", b"Events"))
-		.await?;
+
+	tracing::error!(
+		"{}, {}, {}",
+		substrater.node.websocket.rpc_results.lock().await.len(),
+		substrater
+			.node
+			.websocket
+			.subscription_ids
+			.lock()
+			.await
+			.len(),
+		substrater.node.websocket.subscriptions.lock().await.len(),
+	);
 
 	run().await;
 
