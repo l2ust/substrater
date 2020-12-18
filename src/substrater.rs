@@ -15,11 +15,9 @@ use tracing::trace;
 use crate::{
 	error::{CryptoError, SerdeJsonError, SignatureError, SubstraterResult},
 	extrinsic::*,
-	frame::{
-		balances::Balance,
-		system::{BlockNumber, Hash, Index, RefCount, Version},
-	},
+	frame::system::{BlockNumber, EventRecord, Index, RefCount, Version},
 	r#type::*,
+	runtime::pangolin::{Balance, Event, Hash},
 	websocket::*,
 };
 
@@ -270,7 +268,7 @@ pub async fn test() -> SubstraterResult<()> {
 	let submit_and_watch_extrinsic_future = substrater
 		.node
 		.websocket
-		.submit_and_watch_extrinsic(extrinsic.as_str(), ExtrinsicState::Finalized);
+		.submit_and_watch_extrinsic(extrinsic.as_str(), ExtrinsicState::Ignored);
 	let subscribe_storage_future =
 		substrater
 			.node
@@ -278,27 +276,46 @@ pub async fn test() -> SubstraterResult<()> {
 			.subscribe_storage(substorager::hex_storage_key_with_prefix(
 				"0x", b"System", b"Events",
 			));
+	// let (_, subscription_id) =
+	// async_macros::join!(submit_and_watch_extrinsic_future, subscribe_storage_future).await;
+	// let subscription_id = subscription_id?;
 
-	let (_, subscription_id) =
-		async_macros::join!(submit_and_watch_extrinsic_future, subscribe_storage_future).await;
-	substrater
-		.node
-		.websocket
-		.unsubscribe_storage(subscription_id?)
-		.await?;
+	let subscription_id = subscribe_storage_future.await?;
 
-	tracing::error!(
-		"{}, {}, {}",
-		substrater.node.websocket.rpc_results.lock().await.len(),
-		substrater
+	loop {
+		let raw_events = substrater
 			.node
 			.websocket
-			.subscription_ids
-			.lock()
-			.await
-			.len(),
-		substrater.node.websocket.subscriptions.lock().await.len(),
-	);
+			.take_subscription_of(&subscription_id)
+			.await["params"]["result"]["changes"][0][1]
+			.as_str()
+			.unwrap()
+			.to_owned();
+		let events = <Vec<EventRecord<Event, Hash>>>::decode(&mut &*array_bytes::bytes_unchecked(
+			raw_events,
+		))
+		.unwrap();
+
+		tracing::info!("{:?}", events);
+	}
+
+	// substrater
+	// 	.node
+	// 	.websocket
+	// 	.unsubscribe_storage(subscription_id?)
+	// 	.await?;
+	// tracing::error!(
+	// 	"{}, {}, {}",
+	// 	substrater.node.websocket.rpc_results.lock().await.len(),
+	// 	substrater
+	// 		.node
+	// 		.websocket
+	// 		.subscription_ids
+	// 		.lock()
+	// 		.await
+	// 		.len(),
+	// 	substrater.node.websocket.subscriptions.lock().await.len(),
+	// );
 
 	run().await;
 

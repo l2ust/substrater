@@ -1,6 +1,7 @@
 pub mod error;
 pub mod extrinsic;
 pub mod frame;
+pub mod runtime;
 pub mod substrater;
 pub mod r#type;
 pub mod websocket;

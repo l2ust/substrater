@@ -4,7 +4,7 @@ use std::mem;
 use parity_scale_codec::{Compact, Encode, FullCodec};
 use subcryptor::{MultiSignature, PublicKey};
 // --- substrater ---
-use crate::frame::{balances::Balance, system::Index};
+use crate::{frame::system::Index, runtime::pangolin::Balance};
 
 pub struct SignedPayload<Call: Encode, AdditionalSigned: FullCodec>(
 	pub (Call, Extra, AdditionalSigned),
