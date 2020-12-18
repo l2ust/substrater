@@ -8,7 +8,7 @@ pub mod websocket;
 
 #[async_std::main]
 async fn main() {
-	std::env::set_var("RUST_LOG", "substrater");
+	std::env::set_var("RUST_LOG", "substrater=ERROR");
 	pretty_env_logger::init_timed();
 
 	substrater::test().await.unwrap();

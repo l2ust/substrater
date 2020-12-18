@@ -83,10 +83,12 @@ impl Websocket {
 								debug!("{:?}", msg);
 
 								if let Some(rpc_id) = msg["id"].as_u64() {
+									error!("Lock at connect->rpc_results_cloned");
 									rpc_results_cloned.lock().await.insert(rpc_id as _, msg);
 								} else if let Some(subscription_id) =
 									msg["params"]["subscription"].as_str()
 								{
+									error!("Lock at connect->subscriptions_cloned");
 									subscriptions_cloned
 										.lock()
 										.await
@@ -281,6 +283,7 @@ impl Websocket {
 	}
 
 	pub async fn add_subscription_id(&self, subscription_id: impl Into<SubscriptionId>) {
+		error!("Lock at add_subscription_id->()");
 		self.subscription_ids
 			.lock()
 			.await
@@ -288,6 +291,7 @@ impl Websocket {
 	}
 
 	pub async fn remove_subscription_id(&self, subscription_id: impl AsRef<str>) {
+		error!("Lock at remove_subscription_id->()");
 		self.subscription_ids
 			.lock()
 			.await
@@ -305,6 +309,8 @@ impl Websocket {
 	}
 
 	pub async fn take_subscription_of(&self, subscription_id: impl AsRef<str>) -> Value {
+		error!("Lock at take_subscription_of->Value");
+
 		let subscription_id = subscription_id.as_ref();
 
 		loop {
@@ -319,6 +325,7 @@ impl Websocket {
 pub struct CurrentRpcId(Mutex<RpcId>);
 impl CurrentRpcId {
 	pub async fn get(&self) -> RpcId {
+		error!("Lock at get->rpc_id");
 		let mut mutex = self.0.lock().await;
 		let id = *mutex;
 

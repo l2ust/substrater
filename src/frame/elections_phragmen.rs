@@ -7,8 +7,6 @@ pub enum Event<AccountId, Balance> {
 	EmptyTerm,
 	ElectionError,
 	MemberKicked(AccountId),
-	CandidateSlashed(AccountId, Balance),
-	SeatHolderSlashed(AccountId, Balance),
 	MemberRenounced(AccountId),
 	VoterReported(AccountId, AccountId, bool),
 }

@@ -276,11 +276,9 @@ pub async fn test() -> SubstraterResult<()> {
 			.subscribe_storage(substorager::hex_storage_key_with_prefix(
 				"0x", b"System", b"Events",
 			));
-	// let (_, subscription_id) =
-	// async_macros::join!(submit_and_watch_extrinsic_future, subscribe_storage_future).await;
-	// let subscription_id = subscription_id?;
-
-	let subscription_id = subscribe_storage_future.await?;
+	let (_, subscription_id) =
+		async_macros::join!(submit_and_watch_extrinsic_future, subscribe_storage_future).await;
+	let subscription_id = subscription_id?;
 
 	loop {
 		let raw_events = substrater
@@ -297,25 +295,25 @@ pub async fn test() -> SubstraterResult<()> {
 		.unwrap();
 
 		tracing::info!("{:?}", events);
-	}
 
-	// substrater
-	// 	.node
-	// 	.websocket
-	// 	.unsubscribe_storage(subscription_id?)
-	// 	.await?;
-	// tracing::error!(
-	// 	"{}, {}, {}",
-	// 	substrater.node.websocket.rpc_results.lock().await.len(),
-	// 	substrater
-	// 		.node
-	// 		.websocket
-	// 		.subscription_ids
-	// 		.lock()
-	// 		.await
-	// 		.len(),
-	// 	substrater.node.websocket.subscriptions.lock().await.len(),
-	// );
+		// substrater
+		// 	.node
+		// 	.websocket
+		// 	.unsubscribe_storage(subscription_id?)
+		// 	.await?;
+		tracing::error!(
+			"{}, {}, {}",
+			substrater.node.websocket.rpc_results.lock().await.len(),
+			substrater
+				.node
+				.websocket
+				.subscription_ids
+				.lock()
+				.await
+				.len(),
+			substrater.node.websocket.subscriptions.lock().await.len(),
+		);
+	}
 
 	run().await;
 
