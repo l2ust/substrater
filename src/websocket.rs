@@ -1,4 +1,5 @@
 // --- std ---
+use core::task::Poll;
 use std::{
 	borrow::Borrow,
 	collections::{HashMap, HashSet},
@@ -18,20 +19,21 @@ use futures::{
 	future::{self, Either},
 	pin_mut, SinkExt, StreamExt,
 };
+use futures_lite::FutureExt;
 use serde::Serialize;
 use serde_json::Value;
 use subrpcer::{author, state};
 use tracing::{debug, error, info, trace};
 // --- substrater ---
 use crate::{
-	error::{AsyncError, SubstraterResult},
+	error::{AsyncError, SubstraterResult, WebsocketError},
 	extrinsic::ExtrinsicState,
 	r#type::*,
 };
 
 #[derive(Debug)]
 pub struct Websocket {
-	pub handle: Option<JoinHandle<SubstraterResult<()>>>,
+	pub handle: Mutex<Option<JoinHandle<SubstraterResult<()>>>>,
 	pub sender: Sender<Bytes>,
 	pub rpc_id: CurrentRpcId,
 	pub rpc_results: Arc<Mutex<HashMap<RpcId, Value>>>,
@@ -76,19 +78,16 @@ impl Websocket {
 					Either::Right((msg, _)) => {
 						match msg {
 							Some(msg) => {
-								let msg = msg?;
 								let msg =
-									serde_json::from_slice::<Value>(&msg.into_data()).unwrap();
+									serde_json::from_slice::<Value>(&msg?.into_data()).unwrap();
 
 								debug!("{:?}", msg);
 
 								if let Some(rpc_id) = msg["id"].as_u64() {
-									error!("Lock at connect->rpc_results_cloned");
 									rpc_results_cloned.lock().await.insert(rpc_id as _, msg);
 								} else if let Some(subscription_id) =
 									msg["params"]["subscription"].as_str()
 								{
-									error!("Lock at connect->subscriptions_cloned");
 									subscriptions_cloned
 										.lock()
 										.await
@@ -110,7 +109,7 @@ impl Websocket {
 		});
 
 		Ok(Self {
-			handle: Some(handle),
+			handle: Mutex::new(Some(handle)),
 			sender: client_sender,
 			rpc_id: CurrentRpcId(Mutex::new(1)),
 			rpc_results,
@@ -120,9 +119,21 @@ impl Websocket {
 	}
 
 	pub async fn disconnect(self) {
-		if let Some(handle) = self.handle {
+		if let Some(handle) = self.handle.into_inner() {
 			handle.cancel().await;
 		}
+	}
+
+	pub async fn check_connection(&self) -> SubstraterResult<()> {
+		if let Some(ref mut handle) = self.handle.lock().await.as_mut() {
+			return future::poll_fn(|cx| match handle.poll(cx) {
+				Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+				_ => Poll::Ready(Ok(())),
+			})
+			.await;
+		}
+
+		Err(WebsocketError::AlreadyClosed.into())
 	}
 
 	pub async fn send(&self, msg: impl Into<Bytes>) -> SubstraterResult<()> {
@@ -148,7 +159,7 @@ impl Websocket {
 		)
 		.await?;
 
-		let subscription_id = self.take_rpc_result_of(&rpc_id).await["result"]
+		let subscription_id = self.take_rpc_result_of(&rpc_id).await?["result"]
 			.as_str()
 			.unwrap()
 			.into();
@@ -173,7 +184,7 @@ impl Websocket {
 		)
 		.await?;
 
-		let subscription_id = self.take_rpc_result_of(&rpc_id).await["result"]
+		let subscription_id = self.take_rpc_result_of(&rpc_id).await?["result"]
 			.as_str()
 			.unwrap()
 			.to_owned();
@@ -189,7 +200,7 @@ impl Websocket {
 		}
 
 		loop {
-			let subscription = self.take_subscription_of(&subscription_id).await;
+			let subscription = self.take_subscription_of(&subscription_id).await?;
 			let result = &subscription["params"]["result"];
 			let (extrinsic_state, block_hash) = if result.is_string() {
 				(ExtrinsicState::Ready, "")
@@ -232,8 +243,8 @@ impl Websocket {
 		)
 		.await?;
 
-		// TODO: dead lock if unwatch failed
-		self.take_rpc_result_of(rpc_id).await;
+		// TODO: deadlock if unwatch failed
+		self.take_rpc_result_of(rpc_id).await?;
 
 		self.remove_subscription_id(subscription_id).await;
 
@@ -253,9 +264,9 @@ impl Websocket {
 		)
 		.await?;
 
-		// TODO: dead lock if unsubscribe failed
-		self.take_rpc_result_of(rpc_id).await;
-		self.take_subscription_of(subscription_id).await;
+		// TODO: deadlock if unsubscribe failed
+		self.take_rpc_result_of(rpc_id).await?;
+		self.take_subscription_of(subscription_id).await?;
 
 		self.remove_subscription_id(subscription_id).await;
 
@@ -272,18 +283,19 @@ impl Websocket {
 		self.rpc_results.lock().await.remove(rpc_id.borrow())
 	}
 
-	pub async fn take_rpc_result_of(&self, rpc_id: impl Borrow<RpcId>) -> Value {
+	pub async fn take_rpc_result_of(&self, rpc_id: impl Borrow<RpcId>) -> SubstraterResult<Value> {
 		let rpc_id = rpc_id.borrow();
 
 		loop {
+			self.check_connection().await?;
+
 			if let Some(rpc_result) = self.try_take_rpc_result_of(rpc_id).await {
-				return rpc_result;
+				return Ok(rpc_result);
 			}
 		}
 	}
 
 	pub async fn add_subscription_id(&self, subscription_id: impl Into<SubscriptionId>) {
-		error!("Lock at add_subscription_id->()");
 		self.subscription_ids
 			.lock()
 			.await
@@ -291,7 +303,6 @@ impl Websocket {
 	}
 
 	pub async fn remove_subscription_id(&self, subscription_id: impl AsRef<str>) {
-		error!("Lock at remove_subscription_id->()");
 		self.subscription_ids
 			.lock()
 			.await
@@ -308,14 +319,17 @@ impl Websocket {
 			.remove(subscription_id.as_ref())
 	}
 
-	pub async fn take_subscription_of(&self, subscription_id: impl AsRef<str>) -> Value {
-		error!("Lock at take_subscription_of->Value");
-
+	pub async fn take_subscription_of(
+		&self,
+		subscription_id: impl AsRef<str>,
+	) -> SubstraterResult<Value> {
 		let subscription_id = subscription_id.as_ref();
 
 		loop {
+			self.check_connection().await?;
+
 			if let Some(subscription) = self.try_take_subscription_of(subscription_id).await {
-				return subscription;
+				return Ok(subscription);
 			}
 		}
 	}
@@ -325,7 +339,6 @@ impl Websocket {
 pub struct CurrentRpcId(Mutex<RpcId>);
 impl CurrentRpcId {
 	pub async fn get(&self) -> RpcId {
-		error!("Lock at get->rpc_id");
 		let mut mutex = self.0.lock().await;
 		let id = *mutex;
 

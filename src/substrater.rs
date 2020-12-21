@@ -1,6 +1,7 @@
 // --- std ---
 use std::convert::TryInto;
 // --- crates.io ---
+use async_std::prelude::FutureExt;
 use futures::future;
 use parity_scale_codec::{Compact, Decode, Encode};
 use serde::Deserialize;
@@ -80,7 +81,7 @@ impl Substrater {
 			.await?;
 
 		let account = AccountInfo::decode(&mut &*array_bytes::bytes(
-			self.node.websocket.take_rpc_result_of(&rpc_id).await["result"]
+			self.node.websocket.take_rpc_result_of(&rpc_id).await?["result"]
 				.as_str()
 				.ok_or(SerdeJsonError::ExpectedStr)?,
 		)?)?;
@@ -123,7 +124,7 @@ impl Node {
 		.await;
 
 		let genesis_hash = array_bytes::hex_str_array_unchecked!(
-			websocket.take_rpc_result_of(&get_block_hash_rpc_id).await["result"]
+			websocket.take_rpc_result_of(&get_block_hash_rpc_id).await?["result"]
 				.as_str()
 				.unwrap(),
 			32
@@ -131,13 +132,13 @@ impl Node {
 		let versions = serde_json::from_value(
 			websocket
 				.take_rpc_result_of(&get_runtime_version_rpc_id)
-				.await["result"]
+				.await?["result"]
 				.take(),
 		)
 		.unwrap();
 		let metadata = RuntimeMetadataPrefixed::decode(
 			&mut &*array_bytes::bytes(
-				websocket.take_rpc_result_of(&get_metadata_rpc_id).await["result"]
+				websocket.take_rpc_result_of(&get_metadata_rpc_id).await?["result"]
 					.as_str()
 					.unwrap(),
 			)
@@ -276,8 +277,9 @@ pub async fn test() -> SubstraterResult<()> {
 			.subscribe_storage(substorager::hex_storage_key_with_prefix(
 				"0x", b"System", b"Events",
 			));
-	let (_, subscription_id) =
-		async_macros::join!(submit_and_watch_extrinsic_future, subscribe_storage_future).await;
+	let (_, subscription_id) = submit_and_watch_extrinsic_future
+		.join(subscribe_storage_future)
+		.await;
 	let subscription_id = subscription_id?;
 
 	loop {
@@ -285,7 +287,7 @@ pub async fn test() -> SubstraterResult<()> {
 			.node
 			.websocket
 			.take_subscription_of(&subscription_id)
-			.await["params"]["result"]["changes"][0][1]
+			.await?["params"]["result"]["changes"][0][1]
 			.as_str()
 			.unwrap()
 			.to_owned();
@@ -299,7 +301,7 @@ pub async fn test() -> SubstraterResult<()> {
 		// substrater
 		// 	.node
 		// 	.websocket
-		// 	.unsubscribe_storage(subscription_id?)
+		// 	.unsubscribe_storage(&subscription_id)
 		// 	.await?;
 		tracing::error!(
 			"{}, {}, {}",
@@ -315,12 +317,12 @@ pub async fn test() -> SubstraterResult<()> {
 		);
 	}
 
-	run().await;
+	// run().await;
 
-	Ok(())
+	// Ok(())
 }
 
-pub async fn run() {
-	#[allow(clippy::empty_loop)]
-	loop {}
-}
+// pub async fn run() {
+// 	#[allow(clippy::empty_loop)]
+// 	loop {}
+// }
