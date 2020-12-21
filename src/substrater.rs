@@ -1,17 +1,17 @@
 // --- std ---
 use std::convert::TryInto;
 // --- crates.io ---
-use async_std::prelude::FutureExt;
 use futures::future;
 use parity_scale_codec::{Compact, Decode, Encode};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use subcryptor::{
 	schnorrkel::{self, ExpansionMode, Keypair, MiniSecretKey},
 	PublicKey, SIGNING_CTX,
 };
 use submetadatan::{Metadata, RuntimeMetadataPrefixed};
-use subrpcer::{chain, state};
-use tracing::trace;
+use subrpcer::{author, chain, state};
+use tracing::{error, info, trace};
 // --- substrater ---
 use crate::{
 	error::{CryptoError, SerdeJsonError, SignatureError, SubstraterResult},
@@ -61,32 +61,28 @@ impl Substrater {
 	// pub async block_number(&self) ->
 
 	pub async fn nonce(&self) -> SubstraterResult<Index> {
-		let key = array_bytes::hex_str(
-			"0x",
-			self.node
-				.storage_map_key("System", "Account", self.public_key())?,
-		);
-		let rpc_id = self.node.websocket.rpc_id().await;
+		self.node.nonce_of(self.public_key()).await
+	}
 
+	pub async fn submit_and_watch_extrinsic(
+		&self,
+		extrinsic: impl Serialize,
+		expect_extrinsic_state: ExtrinsicState,
+	) -> SubstraterResult<()> {
 		self.node
-			.websocket
-			.send(
-				serde_json::to_vec(&state::get_storage_with_id(
-					key,
-					<Option<BlockNumber>>::None,
-					rpc_id,
-				))
-				.unwrap(),
-			)
-			.await?;
+			.submit_and_watch_extrinsic(extrinsic, expect_extrinsic_state)
+			.await
+	}
 
-		let account = AccountInfo::decode(&mut &*array_bytes::bytes(
-			self.node.websocket.take_rpc_result_of(&rpc_id).await?["result"]
-				.as_str()
-				.ok_or(SerdeJsonError::ExpectedStr)?,
-		)?)?;
+	pub async fn subscribe_storage(
+		&self,
+		storage_keys: impl AsRef<str>,
+	) -> SubstraterResult<SubscriptionId> {
+		self.node.subscribe_storage(storage_keys).await
+	}
 
-		Ok(account.nonce)
+	pub async fn subscribe_events(&self) -> SubstraterResult<SubscriptionId> {
+		self.node.subscribe_events().await
 	}
 }
 
@@ -220,6 +216,188 @@ impl Node {
 
 		extrinsic.encode()
 	}
+
+	pub async fn nonce_of(&self, public_key: impl AsRef<[u8]>) -> SubstraterResult<Index> {
+		let bytes_key = self.storage_map_key("System", "Account", public_key)?;
+		let hex_str_key = array_bytes::hex_str("0x", bytes_key);
+		let rpc_id = self.websocket.rpc_id().await;
+
+		self.websocket
+			.send(
+				serde_json::to_vec(&state::get_storage_with_id(
+					hex_str_key,
+					<Option<BlockNumber>>::None,
+					rpc_id,
+				))
+				.unwrap(),
+			)
+			.await?;
+
+		let result = &self.websocket.take_rpc_result_of(&rpc_id).await?["result"];
+		let hex_str_result = result.as_str().ok_or(SerdeJsonError::ExpectedStr)?;
+		let raw_account_info = array_bytes::bytes(hex_str_result)?;
+		let account_info = AccountInfo::decode(&mut &*raw_account_info)?;
+
+		Ok(account_info.nonce)
+	}
+
+	pub async fn submit_and_watch_extrinsic(
+		&self,
+		extrinsic: impl Serialize,
+		expect_extrinsic_state: ExtrinsicState,
+	) -> SubstraterResult<()> {
+		let rpc_id = self.websocket.rpc_id().await;
+
+		self.websocket
+			.send(
+				serde_json::to_vec(&author::submit_and_watch_extrinsic_with_id(
+					&extrinsic, rpc_id,
+				))
+				.unwrap(),
+			)
+			.await?;
+
+		let subscription_id = self.websocket.take_rpc_result_of(&rpc_id).await?["result"]
+			.as_str()
+			.unwrap()
+			.to_owned();
+
+		self.websocket.add_subscription_id(&subscription_id).await;
+
+		let unwatch_extrinsic_future = self.unwatch_extrinsic(&subscription_id);
+
+		if expect_extrinsic_state.ignored() {
+			unwatch_extrinsic_future.await?;
+
+			return Ok(());
+		}
+
+		loop {
+			let subscription = self
+				.websocket
+				.take_subscription_of(&subscription_id)
+				.await?;
+			let result = &subscription["params"]["result"];
+			let (extrinsic_state, block_hash) = if result.is_string() {
+				(ExtrinsicState::Ready, "")
+			} else if let Some(block_hash) = result.get("inBlock") {
+				(ExtrinsicState::InBlock, block_hash.as_str().unwrap())
+			} else if let Some(block_hash) = result.get("finalized") {
+				(ExtrinsicState::Finalized, block_hash.as_str().unwrap())
+			} else {
+				// TODO
+				error!("{:?}", subscription);
+
+				(ExtrinsicState::Ignored, "")
+			};
+
+			info!(
+				"`ExtrinsicState({})`: `{:?}({})`",
+				subscription_id, extrinsic_state, block_hash
+			);
+
+			if extrinsic_state.ignored() || extrinsic_state == expect_extrinsic_state {
+				unwatch_extrinsic_future.await?;
+
+				break;
+			}
+		}
+
+		Ok(())
+	}
+
+	pub async fn unwatch_extrinsic(
+		&self,
+		subscription_id: impl AsRef<str>,
+	) -> SubstraterResult<()> {
+		let rpc_id = self.websocket.rpc_id().await;
+		let subscription_id = subscription_id.as_ref();
+
+		self.websocket
+			.send(
+				serde_json::to_vec(&author::unwatch_extrinsic_with_id(subscription_id, rpc_id))
+					.unwrap(),
+			)
+			.await?;
+
+		// TODO: deadlock if unwatch failed
+		self.websocket.take_rpc_result_of(rpc_id).await?;
+
+		self.websocket.remove_subscription_id(subscription_id).await;
+
+		Ok(())
+	}
+
+	pub async fn subscribe_storage(
+		&self,
+		storage_keys: impl AsRef<str>,
+	) -> SubstraterResult<SubscriptionId> {
+		let rpc_id = self.websocket.rpc_id().await;
+
+		self.websocket
+			.send(
+				serde_json::to_vec(&state::subscribe_storage_with_id(
+					[storage_keys.as_ref()],
+					rpc_id,
+				))
+				.unwrap(),
+			)
+			.await?;
+
+		let subscription_id = self.websocket.take_rpc_result_of(&rpc_id).await?["result"]
+			.as_str()
+			.unwrap()
+			.into();
+
+		self.websocket.add_subscription_id(&subscription_id).await;
+
+		Ok(subscription_id)
+	}
+
+	pub async fn unsubscribe_storage(
+		&self,
+		subscription_id: impl AsRef<str>,
+	) -> SubstraterResult<()> {
+		let rpc_id = self.websocket.rpc_id().await;
+		let subscription_id = subscription_id.as_ref();
+
+		self.websocket
+			.send(
+				serde_json::to_vec(&state::unsubscribe_storage_with_id(subscription_id, rpc_id))
+					.unwrap(),
+			)
+			.await?;
+
+		// TODO: deadlock if unsubscribe failed
+		self.websocket.take_rpc_result_of(rpc_id).await?;
+		self.websocket.take_subscription_of(subscription_id).await?;
+
+		self.websocket.remove_subscription_id(subscription_id).await;
+
+		Ok(())
+	}
+
+	// pub async fn unsubscribe_all(&self) {}
+
+	pub async fn subscribe_events(&self) -> SubstraterResult<SubscriptionId> {
+		self.subscribe_storage(substorager::hex_storage_key_with_prefix(
+			"0x", b"System", b"Events",
+		))
+		.await
+	}
+
+	pub fn parse_events<Event, Hash>(result: &Value) -> Vec<EventRecord<Event, Hash>>
+	where
+		Event: Decode,
+		Hash: Decode,
+	{
+		let raw_events = result["params"]["result"]["changes"][0][1]
+			.as_str()
+			.unwrap()
+			.to_owned();
+
+		Decode::decode(&mut &*array_bytes::bytes_unchecked(raw_events)).unwrap()
+	}
 }
 
 #[derive(Debug, Deserialize)]
@@ -248,6 +426,8 @@ pub async fn test() -> SubstraterResult<()> {
 	let uri = "ws://127.0.0.1:9944";
 	let seed = "0xe5be9a5092b81bca64be81d212e7f2f9eba183bb7a90954f7b76361f6edb5c0a";
 	let substrater = Substrater::init(uri, seed).await?;
+	let subscription_id = substrater.subscribe_events().await?;
+
 	let call = call!(
 		substrater,
 		"Balances",
@@ -265,36 +445,17 @@ pub async fn test() -> SubstraterResult<()> {
 		substrater.nonce().await?,
 		0,
 	);
-
-	let submit_and_watch_extrinsic_future = substrater
-		.node
-		.websocket
-		.submit_and_watch_extrinsic(extrinsic.as_str(), ExtrinsicState::Ignored);
-	let subscribe_storage_future =
-		substrater
-			.node
-			.websocket
-			.subscribe_storage(substorager::hex_storage_key_with_prefix(
-				"0x", b"System", b"Events",
-			));
-	let (_, subscription_id) = submit_and_watch_extrinsic_future
-		.join(subscribe_storage_future)
-		.await;
-	let subscription_id = subscription_id?;
+	substrater
+		.submit_and_watch_extrinsic(extrinsic.as_str(), ExtrinsicState::Ignored)
+		.await?;
 
 	loop {
-		let raw_events = substrater
+		let result = substrater
 			.node
 			.websocket
 			.take_subscription_of(&subscription_id)
-			.await?["params"]["result"]["changes"][0][1]
-			.as_str()
-			.unwrap()
-			.to_owned();
-		let events = <Vec<EventRecord<Event, Hash>>>::decode(&mut &*array_bytes::bytes_unchecked(
-			raw_events,
-		))
-		.unwrap();
+			.await?;
+		let events = Node::parse_events::<Event, Hash>(&result);
 
 		tracing::info!("{:?}", events);
 

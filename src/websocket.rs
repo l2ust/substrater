@@ -20,14 +20,11 @@ use futures::{
 	pin_mut, SinkExt, StreamExt,
 };
 use futures_lite::FutureExt;
-use serde::Serialize;
 use serde_json::Value;
-use subrpcer::{author, state};
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, trace};
 // --- substrater ---
 use crate::{
 	error::{AsyncError, SubstraterResult, WebsocketError},
-	extrinsic::ExtrinsicState,
 	r#type::*,
 };
 
@@ -143,137 +140,6 @@ impl Websocket {
 			.await
 			.map_err(AsyncError::from)?)
 	}
-
-	pub async fn subscribe_storage(
-		&self,
-		storage_keys: impl AsRef<str>,
-	) -> SubstraterResult<SubscriptionId> {
-		let rpc_id = self.rpc_id().await;
-
-		self.send(
-			serde_json::to_vec(&state::subscribe_storage_with_id(
-				[storage_keys.as_ref()],
-				rpc_id,
-			))
-			.unwrap(),
-		)
-		.await?;
-
-		let subscription_id = self.take_rpc_result_of(&rpc_id).await?["result"]
-			.as_str()
-			.unwrap()
-			.into();
-
-		self.add_subscription_id(&subscription_id).await;
-
-		Ok(subscription_id)
-	}
-
-	pub async fn submit_and_watch_extrinsic(
-		&self,
-		extrinsic: impl Serialize,
-		expect_extrinsic_state: ExtrinsicState,
-	) -> SubstraterResult<()> {
-		let rpc_id = self.rpc_id().await;
-
-		self.send(
-			serde_json::to_vec(&author::submit_and_watch_extrinsic_with_id(
-				&extrinsic, rpc_id,
-			))
-			.unwrap(),
-		)
-		.await?;
-
-		let subscription_id = self.take_rpc_result_of(&rpc_id).await?["result"]
-			.as_str()
-			.unwrap()
-			.to_owned();
-
-		self.add_subscription_id(&subscription_id).await;
-
-		let unwatch_extrinsic_future = self.unwatch_extrinsic(&subscription_id);
-
-		if expect_extrinsic_state.ignored() {
-			unwatch_extrinsic_future.await?;
-
-			return Ok(());
-		}
-
-		loop {
-			let subscription = self.take_subscription_of(&subscription_id).await?;
-			let result = &subscription["params"]["result"];
-			let (extrinsic_state, block_hash) = if result.is_string() {
-				(ExtrinsicState::Ready, "")
-			} else if let Some(block_hash) = result.get("inBlock") {
-				(ExtrinsicState::InBlock, block_hash.as_str().unwrap())
-			} else if let Some(block_hash) = result.get("finalized") {
-				(ExtrinsicState::Finalized, block_hash.as_str().unwrap())
-			} else {
-				// TODO
-				error!("{:?}", subscription);
-
-				(ExtrinsicState::Ignored, "")
-			};
-
-			info!(
-				"`ExtrinsicState({})`: `{:?}({})`",
-				subscription_id, extrinsic_state, block_hash
-			);
-
-			if extrinsic_state.ignored() || extrinsic_state == expect_extrinsic_state {
-				unwatch_extrinsic_future.await?;
-
-				break;
-			}
-		}
-
-		Ok(())
-	}
-
-	pub async fn unwatch_extrinsic(
-		&self,
-		subscription_id: impl AsRef<str>,
-	) -> SubstraterResult<()> {
-		let rpc_id = self.rpc_id().await;
-		let subscription_id = subscription_id.as_ref();
-
-		self.send(
-			serde_json::to_vec(&author::unwatch_extrinsic_with_id(subscription_id, rpc_id))
-				.unwrap(),
-		)
-		.await?;
-
-		// TODO: deadlock if unwatch failed
-		self.take_rpc_result_of(rpc_id).await?;
-
-		self.remove_subscription_id(subscription_id).await;
-
-		Ok(())
-	}
-
-	pub async fn unsubscribe_storage(
-		&self,
-		subscription_id: impl AsRef<str>,
-	) -> SubstraterResult<()> {
-		let rpc_id = self.rpc_id().await;
-		let subscription_id = subscription_id.as_ref();
-
-		self.send(
-			serde_json::to_vec(&state::unsubscribe_storage_with_id(subscription_id, rpc_id))
-				.unwrap(),
-		)
-		.await?;
-
-		// TODO: deadlock if unsubscribe failed
-		self.take_rpc_result_of(rpc_id).await?;
-		self.take_subscription_of(subscription_id).await?;
-
-		self.remove_subscription_id(subscription_id).await;
-
-		Ok(())
-	}
-
-	// pub async fn unsubscribe_all(&self) {}
 
 	pub async fn rpc_id(&self) -> RpcId {
 		self.rpc_id.get().await
