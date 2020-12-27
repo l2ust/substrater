@@ -1,6 +1,10 @@
 // --- std ---
-use std::convert::TryInto;
+use std::{collections::VecDeque, convert::TryInto};
 // --- crates.io ---
+use async_std::{
+	sync::{Arc, Mutex},
+	task::{self, JoinHandle},
+};
 use futures::future;
 use parity_scale_codec::{Compact, Decode, Encode};
 use serde::{Deserialize, Serialize};
@@ -81,18 +85,35 @@ impl Substrater {
 		self.node.subscribe_storage(storage_keys).await
 	}
 
-	pub async fn subscribe_events(&self) -> SubstraterResult<SubscriptionId> {
+	pub async fn subscribe_events(&self) -> SubstraterResult<JoinHandle<SubstraterResult<()>>> {
 		self.node.subscribe_events().await
+	}
+
+	pub async fn next_events<Event, Hash>(&self) -> Vec<EventRecord<Event, Hash>>
+	where
+		Event: Decode,
+		Hash: Decode,
+	{
+		self.node.next_events().await
+	}
+
+	pub async fn try_next_events<Event, Hash>(&self) -> Option<Vec<EventRecord<Event, Hash>>>
+	where
+		Event: Decode,
+		Hash: Decode,
+	{
+		self.node.try_next_events().await
 	}
 }
 
 #[derive(Debug)]
 pub struct Node {
 	pub uri: String,
-	pub websocket: Websocket,
+	pub websocket: Arc<Websocket>,
 	pub genesis_hash: Hash,
 	pub versions: Versions,
 	pub metadata: Metadata,
+	pub events: Arc<Mutex<VecDeque<Value>>>,
 }
 impl Node {
 	pub async fn init(uri: impl Into<String>) -> SubstraterResult<Self> {
@@ -147,10 +168,11 @@ impl Node {
 
 		Ok(Self {
 			uri,
-			websocket,
+			websocket: Arc::new(websocket),
 			genesis_hash,
 			versions,
 			metadata,
+			events: Arc::new(Mutex::new(VecDeque::new())),
 		})
 	}
 
@@ -379,19 +401,55 @@ impl Node {
 
 	// pub async fn unsubscribe_all(&self) {}
 
-	pub async fn subscribe_events(&self) -> SubstraterResult<SubscriptionId> {
-		self.subscribe_storage(substorager::hex_storage_key_with_prefix(
-			"0x", b"System", b"Events",
-		))
-		.await
+	pub async fn subscribe_events(&self) -> SubstraterResult<JoinHandle<SubstraterResult<()>>> {
+		let websocket = self.websocket.clone();
+		let events = self.events.clone();
+		let subscription_id = self
+			.subscribe_storage(substorager::hex_storage_key_with_prefix(
+				"0x", b"System", b"Events",
+			))
+			.await?;
+
+		Ok(task::spawn(async move {
+			loop {
+				events
+					.lock()
+					.await
+					.push_back(websocket.take_subscription_of(&subscription_id).await?);
+			}
+		}))
 	}
 
-	pub fn parse_events<Event, Hash>(result: &Value) -> Vec<EventRecord<Event, Hash>>
+	pub async fn next_events<Event, Hash>(&self) -> Vec<EventRecord<Event, Hash>>
 	where
 		Event: Decode,
 		Hash: Decode,
 	{
-		let raw_events = result["params"]["result"]["changes"][0][1]
+		loop {
+			if let Some(events) = self.try_next_events().await {
+				return events;
+			}
+		}
+	}
+
+	pub async fn try_next_events<Event, Hash>(&self) -> Option<Vec<EventRecord<Event, Hash>>>
+	where
+		Event: Decode,
+		Hash: Decode,
+	{
+		if let Some(events) = self.events.lock().await.pop_front() {
+			Some(Self::parse_events::<Event, Hash>(&events))
+		} else {
+			None
+		}
+	}
+
+	pub fn parse_events<Event, Hash>(raw_events: &Value) -> Vec<EventRecord<Event, Hash>>
+	where
+		Event: Decode,
+		Hash: Decode,
+	{
+		let raw_events = raw_events["params"]["result"]["changes"][0][1]
 			.as_str()
 			.unwrap()
 			.to_owned();
@@ -426,7 +484,8 @@ pub async fn test() -> SubstraterResult<()> {
 	let uri = "ws://127.0.0.1:9944";
 	let seed = "0xe5be9a5092b81bca64be81d212e7f2f9eba183bb7a90954f7b76361f6edb5c0a";
 	let substrater = Substrater::init(uri, seed).await?;
-	let subscription_id = substrater.subscribe_events().await?;
+
+	substrater.subscribe_events().await?;
 
 	let call = call!(
 		substrater,
@@ -450,20 +509,7 @@ pub async fn test() -> SubstraterResult<()> {
 		.await?;
 
 	loop {
-		let result = substrater
-			.node
-			.websocket
-			.take_subscription_of(&subscription_id)
-			.await?;
-		let events = Node::parse_events::<Event, Hash>(&result);
-
-		tracing::info!("{:?}", events);
-
-		// substrater
-		// 	.node
-		// 	.websocket
-		// 	.unsubscribe_storage(&subscription_id)
-		// 	.await?;
+		tracing::info!("{:?}", substrater.next_events::<Event, Hash>().await);
 		tracing::error!(
 			"{}, {}, {}",
 			substrater.node.websocket.rpc_results.lock().await.len(),
