@@ -14,9 +14,9 @@ use subrpcer::{author, chain, state};
 use tracing::{error, info, trace};
 // --- substrater ---
 use crate::{
-	error::{CryptoError, SerdeJsonError, SignatureError, SubstraterResult},
+	error::{ArrayBytesError, CryptoError, SerdeJsonError, SignatureError, SubstraterResult},
 	extrinsic::*,
-	frame::system::{BlockNumber, EventRecord, Index, RefCount, Version},
+	frame::system::{BlockNumber, EventRecord, Nonce, RefCount, Version},
 	r#type::*,
 	runtime::pangolin::{Balance, Event, Hash},
 	websocket::*,
@@ -29,7 +29,7 @@ macro_rules! call {
 		}};
 }
 
-// SpecVersion, TxVersion, Genesis, Era, Index, Weight, TransactionPayment, EthereumRelayHeaderParcel
+// SpecVersion, TxVersion, Genesis, Era, Nonce, Weight, TransactionPayment, EthereumRelayHeaderParcel
 // pub type DarwiniaAdditionalSigned = (Version, Version, Hash, Hash, (), (), (), ());
 
 pub struct Substrater {
@@ -60,7 +60,7 @@ impl Substrater {
 
 	// pub async block_number(&self) ->
 
-	pub async fn nonce(&self) -> SubstraterResult<Index> {
+	pub async fn nonce(&self) -> SubstraterResult<Nonce> {
 		self.node.nonce_of(self.public_key()).await
 	}
 
@@ -188,7 +188,7 @@ impl Node {
 		call: impl Clone + Encode,
 		signer: &Keypair,
 		era: Era,
-		nonce: Index,
+		nonce: Nonce,
 		tip: Balance,
 	) -> String {
 		let extra = Extra(era, Compact(nonce), Compact(tip));
@@ -217,7 +217,7 @@ impl Node {
 		extrinsic.encode()
 	}
 
-	pub async fn nonce_of(&self, public_key: impl AsRef<[u8]>) -> SubstraterResult<Index> {
+	pub async fn nonce_of(&self, public_key: impl AsRef<[u8]>) -> SubstraterResult<Nonce> {
 		let bytes_key = self.storage_map_key("System", "Account", public_key)?;
 		let hex_str_key = array_bytes::hex_str("0x", bytes_key);
 		let rpc_id = self.websocket.rpc_id().await;
@@ -235,7 +235,7 @@ impl Node {
 
 		let result = &self.websocket.take_rpc_result_of(&rpc_id).await?["result"];
 		let hex_str_result = result.as_str().ok_or(SerdeJsonError::ExpectedStr)?;
-		let raw_account_info = array_bytes::bytes(hex_str_result)?;
+		let raw_account_info = array_bytes::bytes(hex_str_result).map_err(ArrayBytesError::from)?;
 		let account_info = AccountInfo::decode(&mut &*raw_account_info)?;
 
 		Ok(account_info.nonce)
@@ -409,7 +409,7 @@ pub struct Versions {
 
 #[derive(Debug, Decode)]
 pub struct AccountInfo {
-	pub nonce: Index,
+	pub nonce: Nonce,
 	pub ref_count: RefCount,
 	pub data: AccountData,
 }

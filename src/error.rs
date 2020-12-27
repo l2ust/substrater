@@ -1,5 +1,5 @@
 // --- crates.io ---
-pub use array_bytes::Error as ArrayBytesError;
+pub use array_bytes::Error as RawArrayBytesError;
 pub use async_std::channel::{RecvError, SendError};
 pub use async_tungstenite::tungstenite::Error as WebsocketError;
 pub use parity_scale_codec::Error as CodecError;
@@ -7,7 +7,7 @@ pub use serde_json::Error as RawSerdeJsonError;
 pub use submetadatan::Error as MetadataError;
 
 // --- std ---
-use std::fmt::Debug;
+use std::{fmt::Debug, num::ParseIntError};
 // --- crates.io ---
 use thiserror::Error as ThisError;
 
@@ -29,6 +29,22 @@ pub enum Error {
 	Metadata(#[from] MetadataError),
 	#[error("Websocket error")]
 	Websocket(#[from] WebsocketError),
+}
+
+#[derive(Debug, ThisError)]
+pub enum ArrayBytesError {
+	#[error("Fail to convert {} to bytes", hex_str)]
+	InvalidHexLength { hex_str: String },
+	#[error("Fail to parse int")]
+	InvalidChar(ParseIntError),
+}
+impl From<RawArrayBytesError> for ArrayBytesError {
+	fn from(e: RawArrayBytesError) -> Self {
+		match e {
+			RawArrayBytesError::InvalidHexLength { hex_str } => Self::InvalidHexLength { hex_str },
+			RawArrayBytesError::InvalidChar(e) => Self::InvalidChar(e),
+		}
+	}
 }
 
 #[derive(Debug, ThisError)]
