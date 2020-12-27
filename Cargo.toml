@@ -1,8 +1,13 @@
 [package]
-authors = ["Xavier Lau <c.estlavie@icloud.com>"]
-edition = "2018"
-name    = "substrater"
-version = "0.1.0"
+authors     = ["Xavier Lau <c.estlavie@icloud.com>"]
+description = "Substrate Client"
+edition     = "2018"
+homepage    = "https://substrater.l2ust.world"
+license     = "GPL-3.0"
+name        = "substrater"
+readme      = "README.md"
+repository  = "https://github.com/l2ust/substrater"
+version     = "0.1.0"
 
 [dependencies]
 # crates.io
