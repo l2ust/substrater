@@ -247,9 +247,9 @@ impl Node {
 		self.websocket
 			.send(
 				serde_json::to_vec(&state::get_storage_with_id(
+					rpc_id,
 					hex_str_key,
 					<Option<BlockNumber>>::None,
-					rpc_id,
 				))
 				.unwrap(),
 			)
