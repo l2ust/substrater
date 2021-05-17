@@ -11,20 +11,20 @@ version     = "0.1.0"
 
 [dependencies]
 # crates.io
-array-bytes        = { version = "0.3.0" }
-async-std          = { version = "1.8.0", features = ["attributes", "unstable"] }
-async-tungstenite  = { version = "0.10.0", features = ["async-native-tls"] }
-futures            = { version = "0.3.8" }
+array-bytes        = { version = "1.1.0" }
+async-std          = { version = "1.9.0", features = ["attributes", "unstable"] }
+async-tungstenite  = { version = "0.13.1", features = ["async-native-tls"] }
+futures            = { version = "0.3.15" }
 futures-lite       = { version = "1.11.3" }
-isahc              = { version = "0.9.14" }
-parity-scale-codec = { version = "1.3.5", features = ["derive"] }
+isahc              = { version = "1.4.0" }
+parity-scale-codec = { version = "2.1.1", features = ["derive"] }
 pretty_env_logger  = { version = "0.4.0" }
-serde              = { version = "1.0.118", features = ["derive"] }
-serde_json         = { version = "1.0.60" }
-subcryptor         = { version = "0.1.0", features = ["codec", "full-crypto"], path = "../subalfred/subcryptor" }
-subhasher          = { version = "0.1.0", path = "../subalfred/subhasher" }
-submetadatan       = { version = "0.1.0", features = ["codec", "simplify-metadata"], path = "../subalfred/submetadatan" }
-subrpcer           = { version = "0.1.0", path = "../subalfred/subrpcer" }
-substorager        = { version = "0.1.0", path = "../subalfred/substorager" }
-thiserror          = { version = "1.0.23" }
-tracing            = { version = "0.1.22" }
+serde              = { version = "1.0.126", features = ["derive"] }
+serde_json         = { version = "1.0.64" }
+subcryptor         = { version = "0.2.0", features = ["codec", "full-crypto"] }
+subhasher          = { version = "0.1.2" }
+submetadatan       = { version = "0.1.7", features = ["codec", "simplify-metadata"] }
+subrpcer           = { version = "0.2.1" }
+substorager        = { version = "0.1.6" }
+thiserror          = { version = "1.0.24" }
+tracing            = { version = "0.1.26" }
