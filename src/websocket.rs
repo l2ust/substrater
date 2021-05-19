@@ -21,7 +21,6 @@ use futures::{
 };
 use futures_lite::FutureExt;
 use serde_json::Value;
-use tracing::{debug, error, trace};
 // --- substrater ---
 use crate::{
 	error::{AsyncError, SubstraterResult, WebsocketError},
@@ -32,26 +31,21 @@ use crate::{
 pub struct Websocket {
 	pub handle: Mutex<Option<JoinHandle<SubstraterResult<()>>>>,
 	pub sender: Sender<Bytes>,
-	pub rpc_id: CurrentRpcId,
-	pub rpc_results: Arc<Mutex<HashMap<RpcId, Value>>>,
+	pub rpc_id: RpcId,
+	pub rpc_results: Arc<Mutex<HashMap<Id, Value>>>,
 	pub subscription_ids: Mutex<HashSet<SubscriptionId>>,
 	pub subscriptions: Arc<Mutex<HashMap<SubscriptionId, Value>>>,
 }
 // TODO: polish function visible
 impl Websocket {
 	pub async fn connect(uri: impl Display + IntoClientRequest + Unpin) -> SubstraterResult<Self> {
-		trace!("`Websocket` starting a new connection to `{}`", uri);
+		tracing::info!("`Websocket` starting a new connection to `{}`", uri);
 
 		let (client_sender, node_receiver) = channel::unbounded();
 		let rpc_results = Arc::new(Mutex::new(HashMap::new()));
 		let subscriptions = Arc::new(Mutex::new(HashMap::new()));
-		let (websocket, response) = tungstenite_async_std::connect_async(uri).await?;
+		let (websocket, _) = tungstenite_async_std::connect_async(uri).await?;
 		let (mut write, mut read) = websocket.split();
-
-		for (header, _) in response.headers() {
-			trace!("* {}", header);
-		}
-
 		let rpc_results_cloned = rpc_results.clone();
 		let subscriptions_cloned = subscriptions.clone();
 		let handle = task::spawn(async move {
@@ -65,8 +59,7 @@ impl Websocket {
 				match future::select(recv_future, read_future).await {
 					Either::Left((msg, read_future_continue)) => {
 						let msg = msg.map_err(AsyncError::from)?;
-
-						debug!("{:?}", msg);
+						tracing::trace!("{:?}", msg);
 
 						write.send(Message::from(msg)).await?;
 
@@ -77,8 +70,7 @@ impl Websocket {
 							Some(msg) => {
 								let msg =
 									serde_json::from_slice::<Value>(&msg?.into_data()).unwrap();
-
-								debug!("{:?}", msg);
+								tracing::trace!("{:?}", msg);
 
 								if let Some(rpc_id) = msg["id"].as_u64() {
 									rpc_results_cloned.lock().await.insert(rpc_id as _, msg);
@@ -91,7 +83,7 @@ impl Websocket {
 										.insert(subscription_id.into(), msg);
 								} else {
 									// TODO
-									error!("{:?}", msg);
+									tracing::error!("{:?}", msg);
 								}
 
 								read_future = read.next();
@@ -108,7 +100,7 @@ impl Websocket {
 		Ok(Self {
 			handle: Mutex::new(Some(handle)),
 			sender: client_sender,
-			rpc_id: CurrentRpcId(Mutex::new(1)),
+			rpc_id: RpcId(Mutex::new(1)),
 			rpc_results,
 			subscription_ids: Mutex::new(HashSet::new()),
 			subscriptions,
@@ -141,15 +133,15 @@ impl Websocket {
 			.map_err(AsyncError::from)?)
 	}
 
-	pub async fn rpc_id(&self) -> RpcId {
+	pub async fn rpc_id(&self) -> Id {
 		self.rpc_id.get().await
 	}
 
-	pub async fn try_take_rpc_result_of(&self, rpc_id: impl Borrow<RpcId>) -> Option<Value> {
+	pub async fn try_take_rpc_result_of(&self, rpc_id: impl Borrow<Id>) -> Option<Value> {
 		self.rpc_results.lock().await.remove(rpc_id.borrow())
 	}
 
-	pub async fn take_rpc_result_of(&self, rpc_id: impl Borrow<RpcId>) -> SubstraterResult<Value> {
+	pub async fn take_rpc_result_of(&self, rpc_id: impl Borrow<Id>) -> SubstraterResult<Value> {
 		let rpc_id = rpc_id.borrow();
 
 		loop {
@@ -202,13 +194,13 @@ impl Websocket {
 }
 
 #[derive(Debug)]
-pub struct CurrentRpcId(Mutex<RpcId>);
-impl CurrentRpcId {
-	pub async fn get(&self) -> RpcId {
+pub struct RpcId(Mutex<Id>);
+impl RpcId {
+	pub async fn get(&self) -> Id {
 		let mut mutex = self.0.lock().await;
 		let id = *mutex;
 
-		if id == RpcId::max_value() {
+		if id == Id::max_value() {
 			*mutex = 1;
 		} else {
 			*mutex += 1;

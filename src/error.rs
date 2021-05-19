@@ -6,8 +6,6 @@ pub use parity_scale_codec::Error as CodecError;
 pub use serde_json::Error as RawSerdeJsonError;
 pub use submetadatan::Error as MetadataError;
 
-// --- std ---
-use std::{fmt::Debug, num::ParseIntError};
 // --- crates.io ---
 use thiserror::Error as ThisError;
 
@@ -33,16 +31,18 @@ pub enum Error {
 
 #[derive(Debug, ThisError)]
 pub enum ArrayBytesError {
-	#[error("Fail to convert {} to bytes", hex_str)]
-	InvalidHexLength { hex_str: String },
-	#[error("Fail to parse int")]
-	InvalidChar(ParseIntError),
+	#[error("Invalid length `{}`", length)]
+	InvalidLength { length: usize },
+	#[error("Invalid char boundary `{}`", index)]
+	InvalidCharBoundary { index: usize },
 }
 impl From<RawArrayBytesError> for ArrayBytesError {
 	fn from(e: RawArrayBytesError) -> Self {
 		match e {
-			RawArrayBytesError::InvalidHexLength { hex_str } => Self::InvalidHexLength { hex_str },
-			RawArrayBytesError::InvalidChar(e) => Self::InvalidChar(e),
+			RawArrayBytesError::InvalidLength { length } => Self::InvalidLength { length },
+			RawArrayBytesError::InvalidCharBoundary { index } => {
+				Self::InvalidCharBoundary { index }
+			}
 		}
 	}
 }

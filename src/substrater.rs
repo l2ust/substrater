@@ -15,7 +15,6 @@ use subcryptor::{
 };
 use submetadatan::{Metadata, RuntimeMetadataPrefixed};
 use subrpcer::{author, chain, state};
-use tracing::{error, info, trace};
 // --- substrater ---
 use crate::{
 	error::{ArrayBytesError, CryptoError, SerdeJsonError, SignatureError, SubstraterResult},
@@ -42,14 +41,14 @@ pub struct Substrater {
 }
 impl Substrater {
 	pub async fn init(uri: impl Into<String>, seed: &str) -> SubstraterResult<Self> {
-		let signer = MiniSecretKey::from_bytes(&array_bytes::bytes(seed).unwrap())
+		let signer = MiniSecretKey::from_bytes(&array_bytes::hex2bytes(seed).unwrap())
 			.map_err(|_| CryptoError::from(SignatureError::BytesLengthMismatch))?
 			.expand_to_keypair(ExpansionMode::Ed25519);
 
-		trace!("Seed: {}", seed);
-		trace!(
+		tracing::info!("Seed: {}", seed);
+		tracing::info!(
 			"Public key: {}",
-			array_bytes::hex_str("0x", signer.public.to_bytes())
+			array_bytes::bytes2hex("0x", signer.public.to_bytes())
 		);
 
 		Ok(Self {
@@ -125,7 +124,7 @@ impl Node {
 
 		future::join_all(vec![
 			websocket.send(
-				serde_json::to_vec(&chain::get_block_hash_with_id(0u8, get_block_hash_rpc_id))
+				serde_json::to_vec(&chain::get_block_hash_with_id(get_block_hash_rpc_id, 0u8))
 					.unwrap(),
 			),
 			websocket.send(
@@ -140,7 +139,7 @@ impl Node {
 		])
 		.await;
 
-		let genesis_hash = array_bytes::hex_str_array_unchecked!(
+		let genesis_hash = array_bytes::hex2array_unchecked!(
 			websocket.take_rpc_result_of(&get_block_hash_rpc_id).await?["result"]
 				.as_str()
 				.unwrap(),
@@ -154,7 +153,7 @@ impl Node {
 		)
 		.unwrap();
 		let metadata = RuntimeMetadataPrefixed::decode(
-			&mut &*array_bytes::bytes(
+			&mut &*array_bytes::hex2bytes(
 				websocket.take_rpc_result_of(&get_metadata_rpc_id).await?["result"]
 					.as_str()
 					.unwrap(),
@@ -241,7 +240,7 @@ impl Node {
 
 	pub async fn nonce_of(&self, public_key: impl AsRef<[u8]>) -> SubstraterResult<Nonce> {
 		let bytes_key = self.storage_map_key("System", "Account", public_key)?;
-		let hex_str_key = array_bytes::hex_str("0x", bytes_key);
+		let hex_str_key = array_bytes::bytes2hex("0x", bytes_key);
 		let rpc_id = self.websocket.rpc_id().await;
 
 		self.websocket
@@ -257,7 +256,8 @@ impl Node {
 
 		let result = &self.websocket.take_rpc_result_of(&rpc_id).await?["result"];
 		let hex_str_result = result.as_str().ok_or(SerdeJsonError::ExpectedStr)?;
-		let raw_account_info = array_bytes::bytes(hex_str_result).map_err(ArrayBytesError::from)?;
+		let raw_account_info =
+			array_bytes::hex2bytes(hex_str_result).map_err(ArrayBytesError::from)?;
 		let account_info = AccountInfo::decode(&mut &*raw_account_info)?;
 
 		Ok(account_info.nonce)
@@ -308,14 +308,16 @@ impl Node {
 				(ExtrinsicState::Finalized, block_hash.as_str().unwrap())
 			} else {
 				// TODO
-				error!("{:?}", subscription);
+				tracing::error!("{:?}", subscription);
 
 				(ExtrinsicState::Ignored, "")
 			};
 
-			info!(
+			tracing::info!(
 				"`ExtrinsicState({})`: `{:?}({})`",
-				subscription_id, extrinsic_state, block_hash
+				subscription_id,
+				extrinsic_state,
+				block_hash
 			);
 
 			if extrinsic_state.ignored() || extrinsic_state == expect_extrinsic_state {
@@ -454,7 +456,7 @@ impl Node {
 			.unwrap()
 			.to_owned();
 
-		Decode::decode(&mut &*array_bytes::bytes_unchecked(raw_events)).unwrap()
+		Decode::decode(&mut &*array_bytes::hex2bytes_unchecked(raw_events)).unwrap()
 	}
 }
 
@@ -481,7 +483,7 @@ pub struct AccountData {
 }
 
 pub async fn test() -> SubstraterResult<()> {
-	let uri = "ws://127.0.0.1:9944";
+	let uri = "wss://pangolin-rpc.darwinia.network";
 	let seed = "0xe5be9a5092b81bca64be81d212e7f2f9eba183bb7a90954f7b76361f6edb5c0a";
 	let substrater = Substrater::init(uri, seed).await?;
 
@@ -491,8 +493,8 @@ pub async fn test() -> SubstraterResult<()> {
 		substrater,
 		"Balances",
 		"transfer",
-		array_bytes::hex_str_array_unchecked!(
-			"0xe659a7a1628cdd93febc04a4e0646ea20e9f5f0ce097d9a05290d4a9e054df4e",
+		array_bytes::hex2array_unchecked!(
+			"0xb4f7f03bebc56ebe96bc52ea5ed3159d45a0ce3a8d7f082983c33ef133274747",
 			32
 		),
 		Compact(10_000_000_000u128)

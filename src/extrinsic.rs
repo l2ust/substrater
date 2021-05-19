@@ -44,7 +44,7 @@ where
 	Call: Encode,
 {
 	pub fn encode(&self) -> String {
-		array_bytes::hex_str("0x", Encode::encode(self))
+		array_bytes::bytes2hex("0x", Encode::encode(self))
 	}
 }
 impl<Call> Encode for Extrinsic<Call>
